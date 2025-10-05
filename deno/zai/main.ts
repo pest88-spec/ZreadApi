@@ -801,7 +801,19 @@ async function handleStreamResponse(
     const duration = Date.now() - startTime;
     recordRequestStats(startTime, path, 502, 0, model, true, messageCount, clientIP);
     addLiveRequest("POST", path, 502, duration, clientIP, userAgent, model);
-    return new Response("Upstream error", { status: 502 });
+
+    // Return OpenAI-compatible error response
+    const errorResponse = {
+      error: {
+        message: `Upstream server returned error: ${upstreamResp.status} ${upstreamResp.statusText}`,
+        type: "upstream_error",
+        code: "upstream_error",
+      }
+    };
+    return new Response(JSON.stringify(errorResponse), {
+      status: 502,
+      headers: { "Content-Type": "application/json" }
+    });
   }
 
   const encoder = new TextEncoder();
@@ -1007,12 +1019,34 @@ async function handleNonStreamResponse(
     const duration = Date.now() - startTime;
     recordRequestStats(startTime, path, 502, 0, model, false, messageCount, clientIP);
     addLiveRequest("POST", path, 502, duration, clientIP, userAgent, model);
-    return new Response("Upstream error", { status: 502 });
+
+    // Return OpenAI-compatible error response
+    const errorResponse = {
+      error: {
+        message: `Upstream server returned error: ${upstreamResp.status} ${upstreamResp.statusText}`,
+        type: "upstream_error",
+        code: "upstream_error",
+      }
+    };
+    return new Response(JSON.stringify(errorResponse), {
+      status: 502,
+      headers: { "Content-Type": "application/json" }
+    });
   }
 
   const reader = upstreamResp.body?.getReader();
   if (!reader) {
-    return new Response("No response body", { status: 502 });
+    const errorResponse = {
+      error: {
+        message: "No response body from upstream server",
+        type: "upstream_error",
+        code: "no_response_body",
+      }
+    };
+    return new Response(JSON.stringify(errorResponse), {
+      status: 502,
+      headers: { "Content-Type": "application/json" }
+    });
   }
 
   const decoder = new TextDecoder();
