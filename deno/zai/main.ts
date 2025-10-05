@@ -55,9 +55,13 @@ function generateBrowserHeaders(chatID: string, authToken: string): Record<strin
 const ORIGIN_BASE = "https://chat.z.ai";
 
 // Token strategy configuration
-// Priority: ZAI_TOKEN > KV Token Pool > Anonymous Token
-const ANON_TOKEN_ENABLED = !ZAI_TOKEN && !KV_URL;
-const KV_TOKEN_POOL_ENABLED = !ZAI_TOKEN && !!KV_URL;
+// Parse ZAI_TOKEN to support multiple tokens separated by |
+const ZAI_TOKEN_ARRAY = ZAI_TOKEN ? ZAI_TOKEN.split("|").map(t => t.trim()).filter(t => t.length > 0) : [];
+const STATIC_TOKEN_POOL_ENABLED = ZAI_TOKEN_ARRAY.length > 0;
+
+// Priority: Static Token Pool (ZAI_TOKEN) > KV Token Pool > Anonymous Token
+const ANON_TOKEN_ENABLED = !STATIC_TOKEN_POOL_ENABLED && !KV_URL;
+const KV_TOKEN_POOL_ENABLED = !STATIC_TOKEN_POOL_ENABLED && !!KV_URL;
 
 // Thinking tags mode
 const THINK_TAGS_MODE = "strip"; // strip | think | raw
@@ -164,6 +168,19 @@ async function initKVTokenPool() {
     console.error("Failed to initialize KV token pool:", error);
     console.error("Will fall back to anonymous token mode");
   }
+}
+
+// Get random token from static token pool (ZAI_TOKEN)
+function getTokenFromStaticPool(): string | null {
+  if (!STATIC_TOKEN_POOL_ENABLED || ZAI_TOKEN_ARRAY.length === 0) {
+    debugLog("Static token pool not available");
+    return null;
+  }
+
+  // Randomly select a token from the array
+  const randomToken = ZAI_TOKEN_ARRAY[Math.floor(Math.random() * ZAI_TOKEN_ARRAY.length)];
+  debugLog(`Selected token from static pool (${ZAI_TOKEN_ARRAY.length} tokens available): ${randomToken.substring(0, 10)}...`);
+  return randomToken;
 }
 
 // Get random token from KV token pool
@@ -1280,9 +1297,18 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     },
   };
 
-  // Get auth token (priority: X-ZAI-Token header > env ZAI_TOKEN > KV token pool > anonymous)
+  // Get auth token (priority: X-ZAI-Token header > Static Token Pool (ZAI_TOKEN) > KV token pool > anonymous)
   const customZaiToken = req.headers.get("X-ZAI-Token");
-  let authToken = customZaiToken || ZAI_TOKEN;
+  let authToken = customZaiToken || "";
+
+  // If no custom token, try static token pool
+  if (!authToken && STATIC_TOKEN_POOL_ENABLED) {
+    const staticToken = getTokenFromStaticPool();
+    if (staticToken) {
+      authToken = staticToken;
+      debugLog("Token obtained from static pool");
+    }
+  }
 
   // If no token yet, try KV token pool
   if (!authToken && KV_TOKEN_POOL_ENABLED) {
@@ -2892,11 +2918,31 @@ print(response.choices[0].message.content)</pre>
 
         <div class="bg-white rounded-xl shadow-sm border p-8 mb-6">
             <h2 class="text-2xl font-bold text-gray-900 mb-4">🔑 Token 管理策略</h2>
-            <p class="text-gray-700 mb-4">ZtoApi 支持三种 Token 管理策略，优先级从高到低：</p>
+            <p class="text-gray-700 mb-4">ZtoApi 支持四种 Token 管理策略，优先级从高到低：</p>
 
             <div class="space-y-4 mb-6">
                 <div class="border-l-4 border-purple-500 bg-purple-50 p-4 rounded-r-lg">
-                    <h3 class="font-semibold text-purple-900 mb-2">1. 固定 Token（ZAI_TOKEN）</h3>
+                    <h3 class="font-semibold text-purple-900 mb-2">1. 静态 Token 池（ZAI_TOKEN 多 Token）⭐ 新功能</h3>
+                    <p class="text-gray-700 text-sm mb-2">通过 <code class="bg-purple-100 px-1 rounded">|</code> 分隔配置多个 token，每次请求随机选择</p>
+                    <div class="bg-gray-900 rounded p-3 mb-2">
+                        <code class="text-green-400 font-mono text-xs">export ZAI_TOKEN="token1|token2|token3"</code>
+                    </div>
+                    <div class="flex items-start space-x-2 text-sm">
+                        <span class="text-green-600">✓</span>
+                        <span class="text-gray-600">多账号自动轮换，配置简单</span>
+                    </div>
+                    <div class="flex items-start space-x-2 text-sm">
+                        <span class="text-green-600">✓</span>
+                        <span class="text-gray-600">无需外部数据库，适合小规模部署</span>
+                    </div>
+                    <div class="flex items-start space-x-2 text-sm">
+                        <span class="text-green-600">✓</span>
+                        <span class="text-gray-600">负载均衡，降低单账号请求频率</span>
+                    </div>
+                </div>
+
+                <div class="border-l-4 border-indigo-500 bg-indigo-50 p-4 rounded-r-lg">
+                    <h3 class="font-semibold text-indigo-900 mb-2">2. 固定单 Token（ZAI_TOKEN）</h3>
                     <p class="text-gray-700 text-sm mb-2">适用于单一账号，稳定性高</p>
                     <div class="bg-gray-900 rounded p-3">
                         <code class="text-green-400 font-mono text-xs">export ZAI_TOKEN="your-fixed-token"</code>
@@ -2904,7 +2950,7 @@ print(response.choices[0].message.content)</pre>
                 </div>
 
                 <div class="border-l-4 border-blue-500 bg-blue-50 p-4 rounded-r-lg">
-                    <h3 class="font-semibold text-blue-900 mb-2">2. KV Token Pool（KV_URL）⭐ 推荐</h3>
+                    <h3 class="font-semibold text-blue-900 mb-2">3. KV Token Pool（KV_URL）</h3>
                     <p class="text-gray-700 text-sm mb-2">从 Deno KV 数据库随机选择 token，支持多账号负载均衡</p>
                     <div class="bg-gray-900 rounded p-3 mb-2">
                         <code class="text-green-400 font-mono text-xs">export KV_URL="https://api.deno.com/databases/xxx/connect"</code>
@@ -2924,7 +2970,7 @@ print(response.choices[0].message.content)</pre>
                 </div>
 
                 <div class="border-l-4 border-gray-500 bg-gray-50 p-4 rounded-r-lg">
-                    <h3 class="font-semibold text-gray-900 mb-2">3. 匿名 Token（默认）</h3>
+                    <h3 class="font-semibold text-gray-900 mb-2">4. 匿名 Token（默认）</h3>
                     <p class="text-gray-700 text-sm mb-2">每次请求自动获取临时 token</p>
                     <div class="bg-gray-900 rounded p-3">
                         <code class="text-green-400 font-mono text-xs"># 不设置任何环境变量即可</code>
@@ -3191,8 +3237,8 @@ console.log(`📊 Dashboard enabled: ${DASHBOARD_ENABLED}`);
 console.log(`🧠 Thinking enabled: ${ENABLE_THINKING}`);
 
 // Token strategy logging
-if (ZAI_TOKEN) {
-  console.log(`🔑 Token strategy: Fixed token (ZAI_TOKEN)`);
+if (STATIC_TOKEN_POOL_ENABLED) {
+  console.log(`🔑 Token strategy: Static Token Pool (${ZAI_TOKEN_ARRAY.length} tokens configured via ZAI_TOKEN)`);
 } else if (KV_URL) {
   console.log(`🔑 Token strategy: KV token pool (${KV_URL})`);
 } else {
