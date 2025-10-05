@@ -58,10 +58,13 @@ const ORIGIN_BASE = "https://chat.z.ai";
 // Parse ZAI_TOKEN to support multiple tokens separated by |
 const ZAI_TOKEN_ARRAY = ZAI_TOKEN ? ZAI_TOKEN.split("|").map(t => t.trim()).filter(t => t.length > 0) : [];
 const STATIC_TOKEN_POOL_ENABLED = ZAI_TOKEN_ARRAY.length > 0;
+const KV_TOKEN_POOL_ENABLED = !!KV_URL;
 
-// Priority: Static Token Pool (ZAI_TOKEN) > KV Token Pool > Anonymous Token
-const ANON_TOKEN_ENABLED = !STATIC_TOKEN_POOL_ENABLED && !KV_URL;
-const KV_TOKEN_POOL_ENABLED = !STATIC_TOKEN_POOL_ENABLED && !!KV_URL;
+// Token acquisition priority (fallback cascade):
+// 1. X-ZAI-Token header (if provided)
+// 2. Static Token Pool (ZAI_TOKEN environment variable)
+// 3. KV Token Pool (KV_URL database)
+// 4. Anonymous Token (auto-fetch from Z.ai)
 
 // Thinking tags mode
 const THINK_TAGS_MODE = "strip"; // strip | think | raw
@@ -1331,11 +1334,12 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     },
   };
 
-  // Get auth token (priority: X-ZAI-Token header > Static Token Pool (ZAI_TOKEN) > KV token pool > anonymous)
+  // Get auth token with fallback cascade
+  // Priority: X-ZAI-Token header > Static Token Pool > KV Token Pool > Anonymous Token
   const customZaiToken = req.headers.get("X-ZAI-Token");
   let authToken = customZaiToken || "";
 
-  // If no custom token, try static token pool
+  // Fallback 1: Try static token pool (ZAI_TOKEN)
   if (!authToken && STATIC_TOKEN_POOL_ENABLED) {
     const staticToken = getTokenFromStaticPool();
     if (staticToken) {
@@ -1344,7 +1348,7 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     }
   }
 
-  // If no token yet, try KV token pool
+  // Fallback 2: Try KV token pool
   if (!authToken && KV_TOKEN_POOL_ENABLED) {
     try {
       const kvToken = await getTokenFromKVPool();
@@ -1357,16 +1361,35 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     }
   }
 
-  // If still no token, try anonymous token
-  if (!authToken && ANON_TOKEN_ENABLED) {
+  // Fallback 3: Try anonymous token
+  if (!authToken) {
     try {
       authToken = await getAnonymousToken();
-      debugLog("Anonymous token obtained:", authToken.substring(0, 10) + "...");
+      debugLog("Token obtained from anonymous auth");
     } catch (e) {
-      debugLog("Failed to get anonymous token, using fixed token:", e);
+      debugLog("Failed to get anonymous token:", e);
     }
-  } else if (customZaiToken) {
+  }
+
+  // Log token source
+  if (customZaiToken) {
     debugLog("Using custom ZAI token from X-ZAI-Token header");
+  }
+
+  // If still no token after all attempts, return server configuration error
+  if (!authToken) {
+    const errorMessage = "Server configuration error: No valid Z.ai token available. Please configure ZAI_TOKEN or KV_URL environment variable.";
+    debugLog(errorMessage);
+    return new Response(JSON.stringify({
+      error: {
+        message: errorMessage,
+        type: "server_error",
+        code: "token_unavailable"
+      }
+    }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" }
+    });
   }
 
   // Call upstream
@@ -3270,14 +3293,17 @@ console.log(`🌊 Default stream: ${DEFAULT_STREAM}`);
 console.log(`📊 Dashboard enabled: ${DASHBOARD_ENABLED}`);
 console.log(`🧠 Thinking enabled: ${ENABLE_THINKING}`);
 
-// Token strategy logging
+// Token strategy logging (shows configured pools, fallback to anonymous if all fail)
+const tokenSources = [];
 if (STATIC_TOKEN_POOL_ENABLED) {
-  console.log(`🔑 Token strategy: Static Token Pool (${ZAI_TOKEN_ARRAY.length} tokens configured via ZAI_TOKEN)`);
-} else if (KV_URL) {
-  console.log(`🔑 Token strategy: KV token pool (${KV_URL})`);
-} else {
-  console.log(`🔑 Token strategy: Anonymous token`);
+  tokenSources.push(`Static Pool (${ZAI_TOKEN_ARRAY.length} tokens)`);
 }
+if (KV_TOKEN_POOL_ENABLED) {
+  tokenSources.push(`KV Pool`);
+}
+tokenSources.push(`Anonymous`);
+
+console.log(`🔑 Token strategy: ${tokenSources.join(" → ")} (fallback cascade)`);
 
 if (DASHBOARD_ENABLED) {
   console.log(`📊 Dashboard: http://localhost:${PORT}/dashboard`);
