@@ -2,7 +2,7 @@
 
 这是一套运行于 Deno 的 OpenAI 兼容代理，默认对接 Z.ai 的 GLM 系列模型，同时通过环境变量即可无缝切换到 zread.ai（GLM‑4.5 / Claude 4 Sonnet 等）。项目能够将 OpenAI 风格的 `chat/completions` 请求转发到上游服务，自动处理身份认证、SSE 流式输出、思维链内容清洗以及仪表盘监控。
 
-> 如果你只需要快速上手：仔细阅读“4. 配置环境”和“5. 启动服务”两个章节即可。
+> 如果你只需要快速上手：仔细阅读“4. 配置环境”和“5. 启动与验证”两个章节即可。
 
 ---
 
@@ -19,19 +19,20 @@
 
 ## 2. 环境要求
 
-| 组件                         | 说明                                                        | 验证方式                                |
-| ---------------------------- | ----------------------------------------------------------- | --------------------------------------- |
-| Deno ≥ 2.5                   | 代理运行环境，需启用 `--allow-net --allow-env --allow-read` | `deno --version`                        |
-| Git                          | 拉取/更新代码                                               | `git --version`                         |
-| curl 或 HTTPie（可选）       | 快速验证 API                                                | `curl --version`                        |
-| Z.ai / zread.ai 账号（可选） | 若需使用固定 Token，可从浏览器开发者工具复制                | 在浏览器登录并抓包 `Authorization` 头部 |
+| 组件                         | 说明                                                        | 验证方式                      |
+| ---------------------------- | ----------------------------------------------------------- | ----------------------------- |
+| Deno ≥ 2.5                   | 代理运行环境，需启用 `--allow-net --allow-env --allow-read` | `deno --version`              |
+| Git                          | 拉取/更新代码                                               | `git --version`               |
+| curl / HTTPie（可选）        | 快速验证 API                                                | `curl --version`              |
+| Z.ai / zread.ai 账号（可选） | 如需固定 Token，可从浏览器开发者工具复制                    | 登录后查看 `Authorization` 头 |
 
 > Windows 用户建议使用 PowerShell 7+；macOS / Linux 推荐使用 zsh 或 bash。
 
 安装 Deno：
 
 ```bash
-# macOS / Linuxcurl -fsSL https://deno.land/install.sh | sh
+# macOS / Linux
+curl -fsSL https://deno.land/install.sh | sh
 
 # Windows (PowerShell)
 irm https://deno.land/install.ps1 | iex
@@ -44,24 +45,35 @@ irm https://deno.land/install.ps1 | iex
 ```bash
 # 克隆仓库
 git clone https://github.com/pest88-spec/ZreadApi.git
-cd ZreadApi/deno/zai
+cd ZreadApi
 ```
 
-> 如需长期使用，建议 Fork 后再克隆到本地，便于维护自定义配置。
+> 如需长期使用，建议 Fork 后再克隆到本地，便于维护自定义配置。以下命令默认在仓库根目录执行。
 
 ---
 
 ## 4. 配置环境（.env.local）
 
-项目提供 `deno/zai/.env.example` 作为模板，将其复制为 `.env.local`（建议放在仓库根目录）。`.env.local` 用于保存个人/环境敏感配置，不会被 Git 跟踪。
+进入 Deno 子目录并复制环境变量模板：
 
 ```bash
+cd deno/zai
+
 # macOS / Linux
-cp deno/zai/.env.example .env.local
+cp .env.example .env.local
 
 # Windows (PowerShell)
-Copy-Item deno\zai\.env.example .env.local
+Copy-Item .env.example .env.local
 ```
+
+`.env.local` 与 `main.ts` 位于同一目录，启动命令会通过 `--env-file=.env.local` 自动加载。如果希望把配置放在仓库根目录，可以执行：
+
+```bash
+cp .env.example ../../.env.local                    # macOS / Linux
+Copy-Item .env.example ..\..\.env.local             # Windows
+```
+
+此时运行命令需把参数改为 `--env-file=../.env.local`。
 
 常用变量说明：
 
@@ -87,7 +99,7 @@ MODEL_NAME=GLM-4.6
 UPSTREAM_MODEL_ID_DEFAULT=0727-360B-API
 UPSTREAM_MODEL_ID_MAP='{"GLM-4.6":"0727-360B-API"}'
 DEFAULT_KEY=sk-your-key
-UPSTREAM_TOKEN=  # 可选：使用匿名 token 时保留为空
+UPSTREAM_TOKEN=
 ```
 
 ### 4.2 zread.ai 配置示例
@@ -104,11 +116,13 @@ DEFAULT_KEY=sk-your-key
 UPSTREAM_TOKEN=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
-> `.env.local` 存放在本地即可，**必须**在运行命令时通过 `--env-file=.env.local` 显式加载，见下一节。
+`.env.local` 用于保存个人/环境敏感配置，请勿提交到版本库。
 
 ---
 
 ## 5. 启动与验证
+
+以下命令默认在 `deno/zai` 目录执行。
 
 ### 5.1 使用 Deno 任务
 
@@ -126,7 +140,7 @@ deno task start --env-file=.env.local
 deno task dev --env-file=.env.local
 ```
 
-> 若不想创建 `.env.local`，也可以直接在 shell 中 `export` / `set` 环境变量再执行任务。
+> 若 `.env.local` 位于仓库根目录，请将参数改为 `--env-file=../.env.local`。
 
 ### 5.2 手动运行（可选）
 
@@ -172,10 +186,10 @@ deno run --allow-net --allow-env --allow-read --env-file=.env.local main.ts
 
 代理公开的模型名称默认取自 `MODEL_NAME`。当请求指明 `model` 字段时，程序会根据 `UPSTREAM_MODEL_ID_MAP` 将其转换为上游真实模型 ID：
 
-- 键（Key）为客户端可见的模型名称，可以保留大小写与空格；
+- 键（Key）为客户端可见的模型名称，可保留大小写与空格；
 - 值（Value）为上游 `talk` 或 `chat/completions` 需要的真实 ID；
 - 若未命中映射，则回落到 `UPSTREAM_MODEL_ID_DEFAULT`；
-- `/v1/models` 失败时会返回 `MODEL_NAME` + 映射表中的所有键，便于客户端发现可用模型。
+- `/v1/models` 失败时会返回 `MODEL_NAME` 与映射表中的所有键，便于客户端发现可用模型。
 
 示例：
 
@@ -191,30 +205,30 @@ UPSTREAM_MODEL_ID_MAP='{
 
 ## 7. `.env.local` 常见问题
 
-1. **文件未生效**：启动时务必附带 `--env-file=.env.local`；若仍失败，请确认文件在仓库根目录且无 BOM。
+1. **文件未生效**：启动时务必附带 `--env-file=.env.local`；若仍失败，请确认文件位于正确目录且无 BOM。
 2. **值包含特殊字符**：如 JSON 字符串、带空格的 Token，请使用单引号包裹或转义内部引号。
-3. **Windows PowerShell**：使用单引号时无需转义双引号，例如 `'$"value"'`。若使用旧版 `cmd`，建议直接 `set` 环境变量。
+3. **Windows PowerShell**：使用单引号时无需转义双引号，例如 `'{"key":"value"}'`。
 
 ---
 
 ## 8. 常见故障排查
 
-| 症状                    | 可能原因                                           | 处理建议                                                                                |
-| ----------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| 401 `Invalid API key`   | 客户端未携带 `Authorization: Bearer <DEFAULT_KEY>` | 确认 `.env.local` 中的 `DEFAULT_KEY` 并在请求头中使用                                   |
-| 503 `token_unavailable` | 未配置 `UPSTREAM_TOKEN` 且匿名 Token 获取失败      | 登录上游获取最新 Token 或检查网络代理                                                   |
-| 426 / Cloudflare 挑战   | 浏览器指纹或 Cookie 失效                           | 更新 `UPSTREAM_TOKEN`，同时刷新 `cf_clearance` 等 Cookie（curl 可通过 `--cookie` 携带） |
-| `/v1/models` 返回为空   | 映射表错误或上游接口变动                           | 检查 `UPSTREAM_MODEL_ID_MAP` 是否为合法 JSON，必要时通过浏览器抓包确认新的模型 ID       |
-| Dashboard 无数据        | 未触发请求或 KV 权限不足                           | 访问 `/v1/chat/completions` 后刷新 dashboard；若是 Deno Deploy，需启用 KV 权限          |
+| 症状                    | 可能原因                                           | 处理建议                                                                       |
+| ----------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 401 `Invalid API key`   | 客户端未携带 `Authorization: Bearer <DEFAULT_KEY>` | 确认 `.env.local` 中的 `DEFAULT_KEY` 并在请求头中使用                          |
+| 503 `token_unavailable` | 未配置 `UPSTREAM_TOKEN` 且匿名 Token 获取失败      | 登录上游获取最新 Token 或检查网络代理                                          |
+| 426 / Cloudflare 挑战   | 浏览器指纹或 Cookie 失效                           | 更新 `UPSTREAM_TOKEN`，同时刷新 `cf_clearance` 等 Cookie                       |
+| `/v1/models` 返回为空   | 映射表错误或上游接口变动                           | 检查 `UPSTREAM_MODEL_ID_MAP` 是否为合法 JSON，并抓包确认新的模型 ID            |
+| Dashboard 无数据        | 未触发请求或 KV 权限不足                           | 访问 `/v1/chat/completions` 后刷新 dashboard；若在 Deno Deploy，需启用 KV 权限 |
 
-更多日志可在启动终端查看，`DEBUG_MODE=false` 可减少输出。
+更多日志可在启动终端查看；`DEBUG_MODE=false` 可减少输出。
 
 ---
 
 ## 9. 进阶主题
 
 - **KV Token 池**：若部署了批量注册器，可将 tokens 存入 Deno KV，代理会自动从 KV 中轮换使用。
-- **思维链模式**：通过 `THINK_TAGS_MODE=think` 可以把 `<details>` 转换为 `<think>` 标签，便于客户端区分；`raw` 则完全保留。
+- **思维链模式**：通过 `THINK_TAGS_MODE=think` 可把 `<details>` 转换为 `<think>` 标签；`raw` 则完全保留。
 - **Docker 部署**：`Dockerfile.deno` 适用于 Deno 镜像，构建后同样通过环境变量完成配置。
 - **与 Go 版本对比**：根目录的 `main.go` 提供了 CLI 版本实现，功能类似但构建方式不同，可按需选用。
 
