@@ -7,6 +7,29 @@ const DEBUG_MODE = Deno.env.get("DEBUG_MODE") === "true";
 let currentTokenIndex = 0;
 const UPSTREAM_TOKENS = Deno.env.get("UPSTREAM_TOKENS") || Deno.env.get("UPSTREAM_TOKEN") || "";
 
+// 匿名token获取
+async function getAnonymousToken(): Promise<string> {
+  try {
+    const response = await fetch("https://zread.ai/api/v1/auths/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get anonymous token: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data.token || data.access_token || "";
+  } catch (error) {
+    console.error("Failed to get anonymous token:", error);
+    return "";
+  }
+}
+
 // 模型路由 - 根据模型选择上游URL和模型ID
 function resolveModelRouting(model: string): { upstreamUrl: string; upstreamModel: string; platform: string } {
   const modelMap = JSON.parse(Deno.env.get("MODEL_PLATFORM_MAP") || "{}");
@@ -44,18 +67,26 @@ function resolveModelRouting(model: string): { upstreamUrl: string; upstreamMode
   };
 }
 
-function getNextUpstreamToken(): string {
+async function getNextUpstreamToken(): Promise<string> {
   const tokens = UPSTREAM_TOKENS.split("|").map(t => t.trim()).filter(t => t.length > 0);
-  if (tokens.length === 0) return "";
 
-  const token = tokens[currentTokenIndex];
-  currentTokenIndex = (currentTokenIndex + 1) % tokens.length;
+  if (tokens.length > 0) {
+    const token = tokens[currentTokenIndex];
+    currentTokenIndex = (currentTokenIndex + 1) % tokens.length;
 
-  if (DEBUG_MODE) {
-    console.log(`Using token ${currentTokenIndex}/${tokens.length}`);
+    if (DEBUG_MODE) {
+      console.log(`Using configured token ${currentTokenIndex}/${tokens.length}`);
+    }
+
+    return token;
   }
 
-  return token;
+  // 如果没有配置token，使用匿名token
+  if (DEBUG_MODE) {
+    console.log("No configured tokens, fetching anonymous token");
+  }
+
+  return await getAnonymousToken();
 }
 
 // 支持多个API密钥
@@ -185,15 +216,7 @@ Deno.serve(async (req) => {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    if (!UPSTREAM_TOKENS) {
-      return new Response(JSON.stringify({
-        error: { message: "UPSTREAM_TOKENS not configured" }
-      }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
+  
     try {
       const body = await req.json();
       const model = body.model || "glm-4.5";
@@ -203,7 +226,7 @@ Deno.serve(async (req) => {
       const routing = resolveModelRouting(model);
 
       const chatId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const upstreamToken = getNextUpstreamToken();
+      const upstreamToken = await getNextUpstreamToken();
       const headers = generateBrowserHeaders(chatId, upstreamToken, routing.platform);
 
       // 根据平台构建不同的请求体
