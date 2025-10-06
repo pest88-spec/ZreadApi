@@ -250,16 +250,47 @@ Deno.serve(async (req) => {
       let response: Response;
 
       if (routing.platform === "zread") {
-        // 策略1：尝试使用已知的talk_id（从1.txt中获得）
-        const existingTalkId = "f038bf1b-a2bd-11f0-b3f1-1a109de107af";
+        // 每次都创建新会话，避免使用过期的talk_id导致database error
         const userMessage = body.messages[body.messages.length - 1]?.content || "Hello";
 
-        // 直接尝试发送消息到已知会话
-        const messageUrl = `https://zread.ai/api/v1/talk/${existingTalkId}/message`;
+        if (DEBUG_MODE) {
+          console.log("Creating new zread.ai session...");
+        }
+
+        // 第一步：创建会话
+        const sessionResponse = await fetch(routing.upstreamUrl, {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify({
+            query: userMessage
+          })
+        });
+
+        if (!sessionResponse.ok) {
+          const errorText = await sessionResponse.text();
+          if (DEBUG_MODE) {
+            console.log("Session creation failed:", errorText);
+          }
+          throw new Error(`Session creation failed: ${sessionResponse.status} - ${errorText}`);
+        }
+
+        const sessionData = await sessionResponse.json();
+        const chatId = sessionData.id || sessionData.chat_id;
 
         if (DEBUG_MODE) {
-          console.log("Trying existing talk_id:", existingTalkId);
-          console.log("Message URL:", messageUrl);
+          console.log("Session created successfully");
+          console.log("Chat ID:", chatId);
+        }
+
+        if (!chatId) {
+          throw new Error("Failed to get chat session ID");
+        }
+
+        // 第二步：发送消息到新会话
+        const messageUrl = `https://zread.ai/api/v1/talk/${chatId}/message`;
+
+        if (DEBUG_MODE) {
+          console.log("Sending message to:", messageUrl);
         }
 
         response = await fetch(messageUrl, {
@@ -277,56 +308,6 @@ Deno.serve(async (req) => {
 
         if (DEBUG_MODE) {
           console.log("Message response status:", response.status);
-        }
-
-        // 如果现有会话失败，尝试创建新会话
-        if (!response.ok) {
-          if (DEBUG_MODE) {
-            console.log("Existing talk_id failed, creating new session...");
-          }
-
-          // 第一步：创建会话
-          const sessionResponse = await fetch(routing.upstreamUrl, {
-            method: "POST",
-            headers: headers,
-            body: JSON.stringify({
-              query: userMessage
-            })
-          });
-
-          if (!sessionResponse.ok) {
-            const errorText = await sessionResponse.text();
-            if (DEBUG_MODE) {
-              console.log("Session creation failed:", errorText);
-            }
-            throw new Error(`Session creation failed: ${sessionResponse.status} - ${errorText}`);
-          }
-
-          const sessionData = await sessionResponse.json();
-          const chatId = sessionData.id || sessionData.chat_id;
-
-          if (!chatId) {
-            throw new Error("Failed to get chat session ID");
-          }
-
-          // 第二步：发送消息到新会话
-          const newMessageUrl = `https://zread.ai/api/v1/talk/${chatId}/message`;
-          response = await fetch(newMessageUrl, {
-            method: "POST",
-            headers: {
-              ...headers,
-              "Accept": "text/event-stream",
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              query: userMessage,
-              stream: false
-            })
-          });
-
-          if (DEBUG_MODE) {
-            console.log("New message response status:", response.status);
-          }
         }
       } else {
         // zai平台直接调用
