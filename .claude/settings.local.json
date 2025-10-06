@@ -27,7 +27,10 @@
       "Bash(python:*)",
       "Bash(deno check:*)",
       "Bash(PORT=9092 deno run --allow-net --allow-env --allow-read --env-file=.env.local deploy.ts)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "WebFetch(domain:www.deno.com)"
     ],
     "deny": [],
     "ask": []
