@@ -246,11 +246,55 @@ Deno.serve(async (req) => {
         console.log("=== END DEBUG ===");
       }
 
-      const response = await fetch(routing.upstreamUrl, {
-        method: "POST",
-        headers: headers,
-        body: JSON.stringify(upstreamBody)
-      });
+      // zread.ai需要两步：先创建会话，再发送消息
+      let response: Response;
+      let data: any;
+
+      if (routing.platform === "zread") {
+        // 第一步：创建会话
+        const sessionResponse = await fetch(routing.upstreamUrl, {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify({})
+        });
+
+        if (!sessionResponse.ok) {
+          const errorText = await sessionResponse.text();
+          if (DEBUG_MODE) {
+            console.log("Session creation failed:", errorText);
+          }
+          throw new Error(`Session creation failed: ${sessionResponse.status} - ${errorText}`);
+        }
+
+        const sessionData = await sessionResponse.json();
+        const chatId = sessionData.id || sessionData.chat_id;
+
+        if (!chatId) {
+          throw new Error("Failed to get chat session ID");
+        }
+
+        // 第二步：发送消息到会话
+        const messageUrl = `https://zread.ai/api/v1/talk/${chatId}/message`;
+        response = await fetch(messageUrl, {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify({
+            messages: body.messages || [],
+            variables: upstreamBody.variables
+          })
+        });
+
+        if (DEBUG_MODE) {
+          console.log("Sending message to:", messageUrl);
+        }
+      } else {
+        // zai平台直接调用
+        response = await fetch(routing.upstreamUrl, {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify(upstreamBody)
+        });
+      }
 
       if (DEBUG_MODE) {
         console.log("Upstream response status:", response.status);
