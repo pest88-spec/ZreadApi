@@ -1,7 +1,38 @@
-// Deno Deploy version of ZtoApi
+// Deno Deploy version of ZtoApi - Self-contained version
 // Optimized for serverless deployment with no file system access
 
-import { PlatformConfig, resolveModelRouting, RuntimeConfig, listExposedModels } from "./config.ts";
+// Configuration constants
+const DEFAULT_KEY = Deno.env.get("DEFAULT_KEY") || "sk-your-key";
+const MODEL_NAME = Deno.env.get("MODEL_NAME") || "glm-4.5";
+const DEBUG_MODE = (Deno.env.get("DEBUG_MODE") || "false").toLowerCase() === "true";
+const DEFAULT_STREAM = (Deno.env.get("DEFAULT_STREAM") || "true").toLowerCase() === "true";
+const DASHBOARD_ENABLED = (Deno.env.get("DASHBOARD_ENABLED") || "true").toLowerCase() === "true";
+const ENABLE_THINKING = (Deno.env.get("ENABLE_THINKING") || "false").toLowerCase() === "true";
+const UPSTREAM_TOKEN = Deno.env.get("UPSTREAM_TOKEN") || Deno.env.get("ZAI_TOKEN") || "";
+const X_FE_VERSION = Deno.env.get("X_FE_VERSION") || "prod-fe-1.0.94";
+
+// Platform configuration
+const PLATFORM_ID = Deno.env.get("PLATFORM_ID") || "zread";
+const PROVIDER_NAME = Deno.env.get("PROVIDER_NAME") || "zread.ai";
+const PROVIDER_BRAND = Deno.env.get("PROVIDER_BRAND") || "zread.ai";
+const PROVIDER_HOME_URL = Deno.env.get("PROVIDER_HOME_URL") || "https://zread.ai";
+const ORIGIN_BASE = Deno.env.get("ORIGIN_BASE") || "https://zread.ai";
+const PLATFORM_API_BASE = Deno.env.get("PLATFORM_API_BASE") || "https://zread.ai";
+const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") || "https://zread.ai/api/v1/talk";
+const REFERER_PREFIX = Deno.env.get("REFERER_PREFIX") || "/chat/";
+const DEFAULT_UPSTREAM_MODEL_ID = Deno.env.get("DEFAULT_UPSTREAM_MODEL_ID") || "glm-4.5";
+
+// Model routing configuration
+let MODEL_PLATFORM_MAP: Record<string, {platform: string, upstream: string}> = {};
+try {
+  const mapStr = Deno.env.get("MODEL_PLATFORM_MAP") || "{}";
+  MODEL_PLATFORM_MAP = JSON.parse(mapStr);
+} catch (e) {
+  console.warn("Failed to parse MODEL_PLATFORM_MAP:", e);
+  MODEL_PLATFORM_MAP = {
+    [MODEL_NAME]: {platform: "zread", upstream: DEFAULT_UPSTREAM_MODEL_ID}
+  };
+}
 
 // Performance optimization: connection pool for upstream requests
 const connectionCache = new Map<string, ConnectionInfo>();
@@ -93,22 +124,43 @@ function setCachedResponse(cacheKey: string, data: string, ttl: number = 300000)
   });
 }
 
-const PROVIDER_BRAND = PlatformConfig.brand;
-const PROVIDER_HOME_URL = PlatformConfig.homeUrl;
-const ORIGIN_BASE = PlatformConfig.originBase;
-const REFERER_PREFIX = PlatformConfig.refererPrefix;
-const UPSTREAM_URL = PlatformConfig.upstreamUrl;
-const MODELS_URL = PlatformConfig.modelsUrl;
-const AUTH_URL = PlatformConfig.authUrl;
-const OWNED_BY = PlatformConfig.ownedBy;
-const X_FE_VERSION = RuntimeConfig.xFeVersion;
-const DEFAULT_KEY = RuntimeConfig.defaultKey;
-const ZAI_TOKEN = RuntimeConfig.upstreamToken;
-const MODEL_NAME = RuntimeConfig.modelName;
-const DEBUG_MODE = RuntimeConfig.debugMode;
-const DEFAULT_STREAM = RuntimeConfig.defaultStream;
-const DASHBOARD_ENABLED = RuntimeConfig.dashboardEnabled;
-const ENABLE_THINKING = RuntimeConfig.enableThinking;
+// Model routing
+interface ModelResolution {
+  platform: string;
+  platformId: string;
+  clientModel: string;
+  upstreamModelId: string;
+  originBase: string;
+  refererPrefix: string;
+}
+
+function resolveModelRouting(requestedModel?: string): ModelResolution {
+  const input = requestedModel?.trim() || MODEL_NAME;
+  const key = input.toLowerCase();
+
+  let route = MODEL_PLATFORM_MAP[key];
+  if (!route) {
+    // Fallback to default
+    route = {platform: "zread", upstream: DEFAULT_UPSTREAM_MODEL_ID};
+  }
+
+  return {
+    platform: route.platform,
+    platformId: route.platform,
+    clientModel: input,
+    upstreamModelId: route.upstream,
+    originBase: ORIGIN_BASE,
+    refererPrefix: REFERER_PREFIX
+  };
+}
+
+function listExposedModels() {
+  return Object.keys(MODEL_PLATFORM_MAP).map(model => ({
+    id: model,
+    platformId: MODEL_PLATFORM_MAP[model].platform,
+    upstreamModelId: MODEL_PLATFORM_MAP[model].upstream
+  }));
+}
 
 function normalizeOrigin(origin: string): string {
   return origin.endsWith("/") ? origin.slice(0, -1) : origin;
@@ -156,7 +208,8 @@ async function getAnonymousTokenWithTimeout(): Promise<string> {
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
   try {
-    const response = await fetch(AUTH_URL, {
+    const authUrl = `${PLATFORM_API_BASE}/api/v1/auths/`;
+    const response = await fetch(authUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -195,8 +248,8 @@ async function getAnonymousTokenWithTimeout(): Promise<string> {
 
 // Get auth token (fallback cascade)
 async function getAuthToken(): Promise<string> {
-  if (ZAI_TOKEN) {
-    return ZAI_TOKEN;
+  if (UPSTREAM_TOKEN) {
+    return UPSTREAM_TOKEN;
   }
 
   return await getAnonymousTokenWithTimeout();
@@ -225,8 +278,8 @@ async function sendZreadMessageOptimized(messageRequest: any, authToken: string,
         "Content-Type": "application/json; charset=utf-8",
         "Authorization": `Bearer ${authToken}`,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-        "Origin": platform.originBase,
-        "Referer": platform.originBase + platform.refererPrefix,
+        "Origin": resolution.originBase,
+        "Referer": resolution.originBase + resolution.refererPrefix,
         "Accept": stream ? "text/event-stream; charset=utf-8" : "application/json; charset=utf-8",
         "Connection": "keep-alive",
         "Accept-Charset": "utf-8"
@@ -285,7 +338,7 @@ async function handleZreadStreamResponse(response: Response): Promise<Response> 
                       id: parsed.id || "chatcmpl-" + Math.random().toString(36).substr(2, 9),
                       object: "chat.completion.chunk",
                       created: Math.floor(Date.now() / 1000),
-                      model: "glm-4.5",
+                      model: MODEL_NAME,
                       choices: [{
                         index: 0,
                         delta: { content: parsed.text },
@@ -308,7 +361,7 @@ async function handleZreadStreamResponse(response: Response): Promise<Response> 
           id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
           object: "chat.completion.chunk",
           created: Math.floor(Date.now() / 1000),
-          model: "glm-4.5",
+          model: MODEL_NAME,
           choices: [{
             index: 0,
             delta: {},
@@ -382,7 +435,7 @@ async function handleZreadNonStreamResponseOptimized(response: Response, cacheKe
     id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
-    model: "glm-4.5",
+    model: MODEL_NAME,
     choices: [{
       index: 0,
       message: {
@@ -786,7 +839,7 @@ async function handler(req: Request): Promise<Response> {
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
-    "model": "glm-4.5",
+    "model": "${MODEL_NAME}",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'</pre>
         </div>
@@ -834,7 +887,7 @@ console.log(`🐛 Debug mode: ${DEBUG_MODE}`);
 console.log(`🌊 Default stream: ${DEFAULT_STREAM}`);
 console.log(`📊 Dashboard enabled: ${DASHBOARD_ENABLED}`);
 console.log(`🧠 Thinking enabled: ${ENABLE_THINKING}`);
-console.log(`🔑 Token strategy: ${ZAI_TOKEN ? "Static Token" : "Anonymous Token"}`);
+console.log(`🔑 Token strategy: ${UPSTREAM_TOKEN ? "Static Token" : "Anonymous Token"}`);
 
 // Deno Deploy will call the handler directly
 export default handler;
