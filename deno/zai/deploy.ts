@@ -290,8 +290,40 @@ Deno.serve(async (req) => {
           console.log("Repo name:", repos[0].owner + "/" + repos[0].name);
         }
 
-        // 第二步：向repo_id发送消息
-        const messageUrl = `https://zread.ai/api/v1/talk/${repoId}/message`;
+        // 第二步：创建会话（talk）
+        if (DEBUG_MODE) {
+          console.log("Creating talk session with repo_id...");
+        }
+
+        const talkResponse = await fetch("https://zread.ai/api/v1/talk", {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify({
+            repo_id: repoId
+          })
+        });
+
+        if (!talkResponse.ok) {
+          const errorText = await talkResponse.text();
+          if (DEBUG_MODE) {
+            console.log("Talk creation failed:", errorText);
+          }
+          throw new Error(`Talk creation failed: ${talkResponse.status} - ${errorText}`);
+        }
+
+        const talkData = await talkResponse.json();
+        const talkId = talkData.id || talkData.talk_id || talkData.data?.id;
+
+        if (DEBUG_MODE) {
+          console.log("Talk created, talk_id:", talkId);
+        }
+
+        if (!talkId) {
+          throw new Error(`Failed to get talk_id. Response: ${JSON.stringify(talkData)}`);
+        }
+
+        // 第三步：向talk_id发送消息
+        const messageUrl = `https://zread.ai/api/v1/talk/${talkId}/message`;
 
         if (DEBUG_MODE) {
           console.log("Sending message to:", messageUrl);
