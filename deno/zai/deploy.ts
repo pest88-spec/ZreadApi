@@ -305,7 +305,7 @@ Deno.serve(async (req) => {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            text: userMessage,
+            query: userMessage,
             stream: false
           })
         });
