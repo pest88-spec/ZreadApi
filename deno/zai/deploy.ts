@@ -255,7 +255,8 @@ Deno.serve(async (req) => {
           method: "POST",
           headers: headers,
           body: JSON.stringify({
-            content: body.messages[0]?.content || "Hello"
+            content: body.messages[0]?.content || "Hello",
+            model: routing.upstreamModel
           })
         });
 
