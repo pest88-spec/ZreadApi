@@ -270,7 +270,7 @@ Deno.serve(async (req) => {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            content: userMessage,
+            query: userMessage,
             stream: false
           })
         });
@@ -290,7 +290,7 @@ Deno.serve(async (req) => {
             method: "POST",
             headers: headers,
             body: JSON.stringify({
-              content: userMessage
+              query: userMessage
             })
           });
 
@@ -319,7 +319,7 @@ Deno.serve(async (req) => {
               "Content-Type": "application/json"
             },
             body: JSON.stringify({
-              content: userMessage,
+              query: userMessage,
               stream: false
             })
           });
