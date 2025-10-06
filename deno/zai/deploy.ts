@@ -250,50 +250,49 @@ Deno.serve(async (req) => {
       let response: Response;
 
       if (routing.platform === "zread") {
-        // 每次都创建新会话，避免使用过期的talk_id导致database error
+        // zread.ai使用repo_id而不是临时会话
         const userMessage = body.messages[body.messages.length - 1]?.content || "Hello";
 
         if (DEBUG_MODE) {
-          console.log("Creating new zread.ai session...");
+          console.log("Fetching zread.ai repo list...");
         }
 
-        // 第一步：创建会话
-        const sessionResponse = await fetch(routing.upstreamUrl, {
+        // 第一步：获取用户的仓库列表
+        const repoListResponse = await fetch("https://zread.ai/api/v1/personal/repo/recent", {
           method: "POST",
           headers: headers,
-          body: JSON.stringify({
-            query: userMessage
-          })
+          body: JSON.stringify({ limit: 10 })
         });
 
-        if (!sessionResponse.ok) {
-          const errorText = await sessionResponse.text();
+        if (!repoListResponse.ok) {
+          const errorText = await repoListResponse.text();
           if (DEBUG_MODE) {
-            console.log("Session creation failed:", errorText);
+            console.log("Failed to get repo list:", errorText);
           }
-          throw new Error(`Session creation failed: ${sessionResponse.status} - ${errorText}`);
+          throw new Error(`Failed to get repo list: ${repoListResponse.status} - ${errorText}`);
         }
 
-        const sessionData = await sessionResponse.json();
+        const repoData = await repoListResponse.json();
 
         if (DEBUG_MODE) {
-          console.log("Session response data:", JSON.stringify(sessionData));
+          console.log("Repo list response:", JSON.stringify(repoData));
         }
 
-        const chatId = sessionData.id || sessionData.chat_id || sessionData.talk_id ||
-                       sessionData.data?.id || sessionData.data?.chat_id || sessionData.data?.talk_id;
+        // 提取第一个可用的repo_id
+        const repos = repoData.data || [];
+        if (repos.length === 0) {
+          throw new Error("No repositories found in zread.ai account");
+        }
+
+        const repoId = repos[0].repo_id;
 
         if (DEBUG_MODE) {
-          console.log("Extracted chat ID:", chatId);
+          console.log("Using repo_id:", repoId);
+          console.log("Repo name:", repos[0].owner + "/" + repos[0].name);
         }
 
-        if (!chatId) {
-          console.error("Session data keys:", Object.keys(sessionData));
-          throw new Error(`Failed to get chat session ID. Response: ${JSON.stringify(sessionData)}`);
-        }
-
-        // 第二步：发送消息到新会话
-        const messageUrl = `https://zread.ai/api/v1/talk/${chatId}/message`;
+        // 第二步：向repo_id发送消息
+        const messageUrl = `https://zread.ai/api/v1/talk/${repoId}/message`;
 
         if (DEBUG_MODE) {
           console.log("Sending message to:", messageUrl);
@@ -307,7 +306,7 @@ Deno.serve(async (req) => {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            query: userMessage,
+            text: userMessage,
             stream: false
           })
         });
