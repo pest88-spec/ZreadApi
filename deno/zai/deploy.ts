@@ -254,7 +254,9 @@ Deno.serve(async (req) => {
         const sessionResponse = await fetch(routing.upstreamUrl, {
           method: "POST",
           headers: headers,
-          body: JSON.stringify({})
+          body: JSON.stringify({
+            content: body.messages[0]?.content || "Hello"
+          })
         });
 
         if (!sessionResponse.ok) {
