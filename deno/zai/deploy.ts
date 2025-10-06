@@ -257,11 +257,10 @@ Deno.serve(async (req) => {
           console.log("Fetching zread.ai repo list...");
         }
 
-        // 第一步：获取用户的仓库列表
+        // 第一步：获取用户的仓库列表（使用GET请求）
         const repoListResponse = await fetch("https://zread.ai/api/v1/personal/repo/recent", {
-          method: "POST",
-          headers: headers,
-          body: JSON.stringify({ limit: 10 })
+          method: "GET",
+          headers: headers
         });
 
         if (!repoListResponse.ok) {
