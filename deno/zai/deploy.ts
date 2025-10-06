@@ -385,7 +385,7 @@ Deno.serve(async (req) => {
           index: 0,
           message: {
             role: "assistant",
-            content: data.response || data.content || "No response"
+            content: data.text || data.response || data.content || "No response"
           },
           finish_reason: "stop"
         }],
