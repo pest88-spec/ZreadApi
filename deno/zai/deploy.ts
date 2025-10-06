@@ -248,7 +248,6 @@ Deno.serve(async (req) => {
 
       // zread.ai需要两步：先创建会话，再发送消息
       let response: Response;
-      let data: any;
 
       if (routing.platform === "zread") {
         // 第一步：创建会话
