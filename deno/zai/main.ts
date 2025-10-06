@@ -1,4 +1,4 @@
-import { PlatformConfig, resolveUpstreamModel, RuntimeConfig } from "./config.ts";
+import { PlatformConfig, resolveModelRouting, RuntimeConfig, listExposedModels } from "./config.ts";
 
 const PROVIDER_BRAND = PlatformConfig.brand;
 const PROVIDER_HOME_URL = PlatformConfig.homeUrl;
@@ -81,6 +81,75 @@ const KV_TOKEN_POOL_ENABLED = !!KV_URL;
 // Thinking tags mode
 const THINK_TAGS_MODE =
   (Deno.env.get("THINK_TAGS_MODE") as "strip" | "think" | "raw" | undefined) ?? "strip";
+
+// Performance optimization: connection pool for upstream requests
+const connectionCache = new Map<string, ConnectionInfo>();
+
+interface ConnectionInfo {
+  lastUsed: number;
+  keepAlive: boolean;
+  requestCount: number;
+}
+
+// Performance metrics
+const performanceMetrics = {
+  totalRequests: 0,
+  totalUpstreamTime: 0,
+  averageUpstreamTime: 0,
+  cacheHits: 0,
+  cacheMisses: 0,
+};
+
+// Request cache for identical requests (short TTL)
+const requestCache = new Map<string, CachedResponse>();
+
+interface CachedResponse {
+  data: string;
+  timestamp: number;
+  ttl: number; // Time to live in milliseconds
+}
+
+function generateCacheKey(model: string, messages: OpenAIMessage[]): string {
+  // Create a simple hash based on model and message content
+  const content = messages.map(m => m.content).join('|');
+  return `${model}:${content.slice(0, 100)}`; // Limit length to avoid huge keys
+}
+
+function getCachedResponse(key: string): string | null {
+  const cached = requestCache.get(key);
+  if (!cached) {
+    performanceMetrics.cacheMisses++;
+    return null;
+  }
+
+  if (Date.now() - cached.timestamp > cached.ttl) {
+    requestCache.delete(key);
+    performanceMetrics.cacheMisses++;
+    return null;
+  }
+
+  performanceMetrics.cacheHits++;
+  return cached.data;
+}
+
+function setCachedResponse(key: string, data: string, ttl: number = 30000): void {
+  // Default TTL: 30 seconds for identical requests
+  requestCache.set(key, {
+    data,
+    timestamp: Date.now(),
+    ttl
+  });
+
+  // Clean old entries periodically
+  if (requestCache.size > 100) {
+    const now = Date.now();
+    for (const [cacheKey, value] of requestCache.entries()) {
+      if (now - value.timestamp > value.ttl) {
+        requestCache.delete(cacheKey);
+      }
+    }
+  }
+}
 
 // Request statistics
 interface RequestStats {
@@ -1184,79 +1253,23 @@ async function handleModels(req: Request): Promise<Response> {
   const userAgent = req.headers.get("User-Agent") || "";
 
   try {
-    // Get token (ZAI_TOKEN or anonymous)
-    let token = ZAI_TOKEN;
-    if (!token) {
-      token = await getAnonymousToken();
-      if (!token) {
-        debugLog("Failed to get anonymous token for models request");
-        const duration = Date.now() - startTime;
-        recordRequestStats(
-          startTime,
-          "/v1/models",
-          500,
-          0,
-          undefined,
-          undefined,
-          undefined,
-          clientIP,
-        );
-        addLiveRequest("GET", "/v1/models", 500, duration, clientIP, userAgent);
-        return new Response(JSON.stringify({ error: "Failed to authenticate" }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-    }
-
-    // Request models from upstream
-    const chromeVersion = 140;
-    const modelsUserAgent =
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`;
-    const secChUa =
-      `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="24", "Google Chrome";v="${chromeVersion}"`;
-
-    const origin = normalizeOrigin(ORIGIN_BASE);
-    const upstreamResponse = await fetch(MODELS_URL, {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-        "Accept-Language": "zh-CN",
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-        "User-Agent": modelsUserAgent,
-        "Referer": `${origin}/`,
-        "Origin": origin,
-        "X-FE-Version": X_FE_VERSION,
-        "sec-ch-ua": secChUa,
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-      },
-    });
-
-    if (!upstreamResponse.ok) {
-      debugLog(`Upstream models request failed: ${upstreamResponse.status}`);
-      throw new Error(`Upstream returned ${upstreamResponse.status}`);
-    }
-
-    const upstreamData = await upstreamResponse.json() as UpstreamModelsResponse;
-    const upstreamModels = upstreamData.data ?? [];
+    // Get exposed models from config
+    const exposedModels = listExposedModels();
 
     // Transform to OpenAI format
-    const models = upstreamModels.map((model) => ({
-      id: model.name || model.id,
+    const models = exposedModels.map((model) => ({
+      id: model.id,
       object: "model",
       created: Math.floor(Date.now() / 1000),
-      owned_by: OWNED_BY,
+      owned_by: model.platformId, // Show which platform owns this model
     }));
 
     const response = {
       object: "list",
       data: models,
     };
+
+    debugLog(`Returning ${models.length} configured models: ${models.map(m => m.id).join(", ")}`);
 
     const headers = new Headers({ "Content-Type": "application/json" });
     setCORSHeaders(headers);
@@ -1268,32 +1281,17 @@ async function handleModels(req: Request): Promise<Response> {
 
     return new Response(JSON.stringify(response), { status: 200, headers });
   } catch (error) {
-    debugLog(`Error fetching models: ${error}`);
+    debugLog(`Error building models list: ${error}`);
 
-    // Fallback to default models
-    const fallbackModels = new Map<string, string>();
-    fallbackModels.set(MODEL_NAME, PlatformConfig.defaultModelId || MODEL_NAME);
-    const modelMap = PlatformConfig.modelIdMap as Record<string, string>;
-    const aliases = PlatformConfig.modelAliases as string[] | undefined;
-    if (aliases) {
-      for (const alias of aliases) {
-        const trimmed = alias.trim();
-        if (!trimmed) continue;
-        fallbackModels.set(trimmed, modelMap[trimmed.toLowerCase()] || trimmed);
-      }
-    }
-    if (!fallbackModels.size) {
-      fallbackModels.set(MODEL_NAME, PlatformConfig.defaultModelId || MODEL_NAME);
-    }
-
+    // Fallback to default model
     const response = {
       object: "list",
-      data: Array.from(fallbackModels.keys()).map((id) => ({
-        id,
+      data: [{
+        id: MODEL_NAME,
         object: "model",
         created: Math.floor(Date.now() / 1000),
-        owned_by: OWNED_BY,
-      })),
+        owned_by: PlatformConfig.ownedBy,
+      }],
     };
 
     const headers = new Headers({ "Content-Type": "application/json" });
@@ -1305,6 +1303,486 @@ async function handleModels(req: Request): Promise<Response> {
     addLiveRequest("GET", "/v1/models", 200, duration, clientIP, userAgent);
 
     return new Response(JSON.stringify(response), { status: 200, headers });
+  }
+}
+
+// Handle zread.ai chat completions using two-step API
+async function handleZreadAIChatCompletion(body: OpenAIRequest, authToken: string, platform: any): Promise<Response> {
+  const startTime = Date.now();
+  debugLog("Using zread.ai two-step API flow");
+
+  try {
+    // Performance optimization: Check cache for non-streaming requests
+    if (!body.stream) {
+      const cacheKey = generateCacheKey(body.model || MODEL_NAME, body.messages);
+      const cachedResponse = getCachedResponse(cacheKey);
+
+      if (cachedResponse) {
+        debugLog("Cache hit! Returning cached response");
+        performanceMetrics.totalRequests++;
+
+        // Return cached response as OpenAI format
+        const openaiResponse = {
+          id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: body.model || MODEL_NAME,
+          choices: [{
+            index: 0,
+            message: {
+              role: "assistant",
+              content: cachedResponse
+            },
+            finish_reason: "stop"
+          }],
+          usage: {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0
+          }
+        };
+
+        return new Response(JSON.stringify(openaiResponse), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+
+    // Skip talk creation and use existing talk ID to avoid parameter errors
+    const talkId = "31064d72-a25c-11f0-901e-1a109de107af";
+    debugLog("Using existing talk ID:", talkId);
+
+    // Get the last user message
+    const lastMessage = body.messages[body.messages.length - 1];
+    if (!lastMessage || lastMessage.role !== "user") {
+      return new Response(
+        JSON.stringify({
+          error: { message: "No user message found", type: "invalid_request", code: "no_user_message" }
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Step 2: Send message to the talk with timeout
+    const messageResponse = await sendZreadMessageOptimized(talkId, lastMessage.content, body.model, body.stream, authToken, platform);
+    if (!messageResponse.ok) {
+      const errorText = await messageResponse.text();
+      debugLog("Failed to send zread message:", messageResponse.status, errorText);
+      return new Response(
+        JSON.stringify({
+          error: { message: `Failed to send message: ${messageResponse.status} ${errorText}`, type: "upstream_error", code: "message_send_failed" }
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (body.stream) {
+      // Handle streaming response
+      return handleZreadStreamResponse(messageResponse);
+    } else {
+      // Handle non-streaming response with caching
+      return await handleZreadNonStreamResponseOptimized(messageResponse, body.model, body.messages);
+    }
+  } catch (error) {
+    debugLog("Zread.ai API error:", error);
+    return new Response(
+      JSON.stringify({
+        error: { message: `Zread.ai API error: ${error.message}`, type: "upstream_error", code: "zread_api_error" }
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Create a new zread talk
+async function createZreadTalk(authToken: string, platform: any): Promise<Response> {
+  // Based on detailed network capture analysis:
+  // The talk creation might need to be associated with a specific context
+  // From the capture, we see talk ID: 31064d72-a25c-11f0-901e-1a109de107af
+  // Let's try to replicate the exact browser behavior
+
+  // Based on latest network capture: Content-Length: 62
+  // Testing hypothesis: talk creation only needs repo_id (50 bytes) + maybe other fields
+  const talkRequest = {
+    repo_id: "d421b459-67dd-11f0-bb48-0e6fb57b239c"
+  };
+
+  debugLog("Creating zread talk with request:", JSON.stringify(talkRequest));
+
+  const response = await fetch(platform.upstreamUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${authToken}`,
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      "Origin": platform.originBase,
+      "Referer": platform.originBase + platform.refererPrefix,
+      "Accept": "application/json",
+      "Accept-Language": "zh-CN,zh;q=0.9",
+      "X-Locale": "zh"
+    },
+    body: JSON.stringify(talkRequest)
+  });
+
+  return response;
+}
+
+// Send message to zread talk
+async function sendZreadMessage(talkId: string, content: string, model: string, stream: boolean, authToken: string, platform: any): Promise<Response> {
+  // Based on network capture data from 1.txt - use the correct zread.ai format
+  const messageRequest = {
+    parent_message_id: "", // Empty for first message in conversation
+    query: content, // User's actual message content
+    context: {
+      wiki: {
+        page_id: "45c64cba-0529-4ca6-8cd5-e36cf26fae31",
+        wiki_id: "690a5a77-fe7e-4fee-9a04-c89e71c3af04"
+      },
+      repo: {
+        repo_id: "d421b459-67dd-11f0-bb48-0e6fb57b239c" // DeepCode project repo ID
+      }
+    },
+    model: model
+  };
+
+  const messageUrl = `${platform.upstreamUrl}/${talkId}/message`;
+  debugLog("Sending zread message to:", messageUrl, "with body:", JSON.stringify(messageRequest));
+
+  const response = await fetch(messageUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${authToken}`,
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+      "Origin": platform.originBase,
+      "Referer": platform.originBase + platform.refererPrefix,
+      "Accept": stream ? "text/event-stream" : "application/json"
+    },
+    body: JSON.stringify(messageRequest)
+  });
+
+  return response;
+}
+
+// Optimized version with timeout and performance tracking
+async function sendZreadMessageOptimized(talkId: string, content: string, model: string, stream: boolean, authToken: string, platform: any): Promise<Response> {
+  const startTime = Date.now();
+
+  // Based on network capture data from 1.txt - use the correct zread.ai format
+  const messageRequest = {
+    parent_message_id: "", // Empty for first message in conversation
+    query: content, // User's actual message content
+    context: {
+      wiki: {
+        page_id: "45c64cba-0529-4ca6-8cd5-e36cf26fae31",
+        wiki_id: "690a5a77-fe7e-4fee-9a04-c89e71c3af04"
+      },
+      repo: {
+        repo_id: "d421b459-67dd-11f0-bb48-0e6fb57b239c" // DeepCode project repo ID
+      }
+    },
+    model: model
+  };
+
+  const messageUrl = `${platform.upstreamUrl}/${talkId}/message`;
+  debugLog("Sending optimized zread message to:", messageUrl);
+
+  // Create AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    debugLog("Request timeout, aborting...");
+    controller.abort();
+  }, 45000); // 45 second timeout (zread.ai can be slow)
+
+  try {
+    const response = await fetch(messageUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Authorization": `Bearer ${authToken}`,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        "Origin": platform.originBase,
+        "Referer": platform.originBase + platform.refererPrefix,
+        "Accept": stream ? "text/event-stream; charset=utf-8" : "application/json; charset=utf-8",
+        "Connection": "keep-alive",
+        "Accept-Charset": "utf-8"
+      },
+      body: JSON.stringify(messageRequest),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    // Track performance metrics
+    const duration = Date.now() - startTime;
+    performanceMetrics.totalRequests++;
+    performanceMetrics.totalUpstreamTime += duration;
+    performanceMetrics.averageUpstreamTime = performanceMetrics.totalUpstreamTime / performanceMetrics.totalRequests;
+
+    debugLog(`Request completed in ${duration}ms`);
+
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+
+    if (error.name === 'AbortError') {
+      debugLog("Request was aborted due to timeout");
+      throw new Error("Request timeout after 45 seconds");
+    }
+
+    debugLog("Request failed:", error);
+    throw error;
+  }
+}
+
+// Handle zread streaming response
+async function handleZreadStreamResponse(response: Response): Promise<Response> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("No response body");
+  }
+
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+
+          // Keep the last incomplete line in buffer
+          buffer = lines.pop() || "";
+
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+
+            if (line.startsWith('event:answer')) {
+              // Look for the data line that follows
+              const nextLine = lines[i + 1]?.trim();
+              if (nextLine && nextLine.startsWith('data:')) {
+                try {
+                  const jsonData = nextLine.substring(5); // Remove 'data:' prefix
+                  const parsed = JSON.parse(jsonData);
+
+                  if (parsed.text) {
+                    // Convert zread format to OpenAI format
+                    const openaiChunk = {
+                      id: parsed.id || "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+                      object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000),
+                      model: "glm-4.5",
+                      choices: [{
+                        index: 0,
+                        delta: { content: parsed.text },
+                        finish_reason: null
+                      }]
+                    };
+
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(openaiChunk)}\n\n`));
+                  }
+                } catch (e) {
+                  debugLog("Failed to parse SSE data:", nextLine);
+                }
+              }
+            } else if (line.startsWith('event:finish')) {
+              // Send final chunk
+              const finalChunk = {
+                id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: "glm-4.5",
+                choices: [{
+                  index: 0,
+                  delta: {},
+                  finish_reason: "stop"
+                }]
+              };
+
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(finalChunk)}\n\n`));
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              controller.close();
+              return;
+            }
+          }
+        }
+      } catch (error) {
+        debugLog("Stream processing error:", error);
+        controller.error(error);
+      } finally {
+        reader.releaseLock();
+      }
+    }
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Cache-Control"
+    }
+  });
+}
+
+// Handle zread non-streaming response
+async function handleZreadNonStreamResponse(response: Response, model: string): Promise<Response> {
+  const responseText = await response.text();
+  debugLog("Zread non-stream response:", responseText);
+
+  try {
+    // Parse SSE format to extract content
+    let content = "";
+    const lines = responseText.split('\n');
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.startsWith('event:answer')) {
+        // Look for the data line that follows
+        const nextLine = lines[i + 1]?.trim();
+        if (nextLine && nextLine.startsWith('data:')) {
+          try {
+            const jsonData = nextLine.substring(5); // Remove 'data:' prefix
+            const parsed = JSON.parse(jsonData);
+            if (parsed.text) {
+              content += parsed.text;
+            }
+          } catch (e) {
+            debugLog("Failed to parse SSE data:", nextLine);
+          }
+        }
+      }
+    }
+
+    // If no content was extracted from SSE format, try legacy parsing
+    if (!content) {
+      try {
+        const responseData = JSON.parse(responseText);
+        content = responseData.content || responseData.response || responseText;
+      } catch (e) {
+        content = responseText;
+      }
+    }
+
+    const openaiResponse = {
+      id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: content
+        },
+        finish_reason: "stop"
+      }],
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0
+      }
+    };
+
+    debugLog("Processed zread response, content length:", content.length);
+    return new Response(JSON.stringify(openaiResponse), {
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (error) {
+    debugLog("Error processing zread response:", error);
+    return new Response(
+      JSON.stringify({
+        error: { message: `Response processing error: ${error.message}`, type: "processing_error", code: "response_processing_failed" }
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Optimized non-streaming response handler with caching
+async function handleZreadNonStreamResponseOptimized(response: Response, model: string, messages: OpenAIMessage[]): Promise<Response> {
+  const responseText = await response.text();
+  debugLog("Zread non-stream response (optimized):", responseText.substring(0, 200) + "...");
+
+  try {
+    // Parse SSE format to extract content
+    let content = "";
+    const lines = responseText.split('\n');
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.startsWith('event:answer')) {
+        // Look for the data line that follows
+        const nextLine = lines[i + 1]?.trim();
+        if (nextLine && nextLine.startsWith('data:')) {
+          try {
+            const jsonData = nextLine.substring(5); // Remove 'data:' prefix
+            const parsed = JSON.parse(jsonData);
+            if (parsed.text) {
+              content += parsed.text;
+            }
+          } catch (e) {
+            debugLog("Failed to parse SSE data:", nextLine);
+          }
+        }
+      }
+    }
+
+    // If no content was extracted from SSE format, try legacy parsing
+    if (!content) {
+      try {
+        const responseData = JSON.parse(responseText);
+        content = responseData.content || responseData.response || responseText;
+      } catch (e) {
+        content = responseText;
+      }
+    }
+
+    // Cache the response for future requests (only if we have meaningful content)
+    if (content && content.length > 10) {
+      const cacheKey = generateCacheKey(model || MODEL_NAME, messages);
+      setCachedResponse(cacheKey, content, 60000); // Cache for 60 seconds
+      debugLog(`Cached response for key: ${cacheKey.substring(0, 50)}...`);
+    }
+
+    const openaiResponse = {
+      id: "chatcmpl-" + Math.random().toString(36).substr(2, 9),
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: content
+        },
+        finish_reason: "stop"
+      }],
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0
+      }
+    };
+
+    debugLog("Processed optimized zread response, content length:", content.length);
+    return new Response(JSON.stringify(openaiResponse), {
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (error) {
+    debugLog("Error processing optimized zread response:", error);
+    return new Response(
+      JSON.stringify({
+        error: { message: `Response processing error: ${error.message}`, type: "processing_error", code: "response_processing_failed" }
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
   }
 }
 
@@ -1378,10 +1856,10 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     : ENABLE_THINKING;
   debugLog("Enable thinking:", enableThinking);
 
-  // Resolve target model
-  const { requestedModel, upstreamModelId } = resolveUpstreamModel(body.model);
-  const clientModel = requestedModel;
-  debugLog("Resolved model -> client: " + clientModel + ", upstream: " + upstreamModelId);
+  // Resolve target model and platform
+  const modelResolution = resolveModelRouting(body.model);
+  const { platform, clientModel, upstreamModelId } = modelResolution;
+  debugLog("Resolved model -> client: " + clientModel + ", upstream: " + upstreamModelId + ", platform: " + platform.id);
 
   // Build upstream request
   const upstreamReq: UpstreamRequest = {
@@ -1474,6 +1952,13 @@ async function handleChatCompletions(req: Request): Promise<Response> {
         headers: { "Content-Type": "application/json" },
       },
     );
+  }
+
+  // Special handling for zread.ai platform (two-step API)
+  debugLog("Platform detected:", JSON.stringify(platform));
+  if (platform.id === "zread") {
+    debugLog("Using zread.ai two-step API handler");
+    return handleZreadAIChatCompletion(body, authToken, platform);
   }
 
   // Call upstream

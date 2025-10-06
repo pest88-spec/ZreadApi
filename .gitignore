@@ -83,3 +83,22 @@ yarn-error.log*
 
 # Docker volumes
 docker-volumes/
+
+# Sensitive account/token files
+test.txt
+1.txt
+*.txt
+
+# Temporary and empty files
+nul
+talk.md
+
+# Log directory and files
+log/
+*.log
+
+# Additional sensitive files
+accounts.txt
+tokens.txt
+secrets.txt
+credentials.txt

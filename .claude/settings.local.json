@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod:*)",
+      "Bash(go fmt:*)",
+      "Bash(go list:*)",
+      "Bash(go:*)",
+      "Bash(find:*)",
+      "Bash(copy:*)",
+      "Bash(deno run:*)",
+      "Bash(curl:*)",
+      "WebSearch",
+      "Bash(lsof:*)",
+      "Bash(xargs kill:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(taskkill:*)",
+      "Bash(pkill:*)",
+      "Bash(awk:*)",
+      "Bash(xargs:*)",
+      "Bash(PORT=9091 deno run --allow-net --allow-env --allow-read --env-file=.env.local main.ts)",
+      "Bash(deno task:*)",
+      "Bash(cmd /c \"taskkill /F /PID 29932 & taskkill /F /PID 28112 & taskkill /F /PID 16800\")",
+      "Bash(tskill:*)",
+      "Bash(PORT=9090 deno run --allow-net --allow-env --allow-read --env-file=.env.local main.ts)",
+      "Bash(time curl:*)",
+      "Bash(python:*)",
+      "Bash(deno check:*)",
+      "Bash(PORT=9092 deno run --allow-net --allow-env --allow-read --env-file=.env.local deploy.ts)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

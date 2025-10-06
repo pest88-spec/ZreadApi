@@ -1,8 +1,19 @@
-# OpenAI兼容API代理 for Z.ai GLM-4.6
+# ZtoApi - OpenAI兼容API代理
 
-这是一个为Z.ai GLM-4.6模型提供OpenAI兼容API接口的代理服务器。它允许你使用标准的OpenAI API格式与Z.ai的GLM-4.6模型进行交互，支持流式和非流式响应。
+这是一个为 **Z.ai** 和 **zread.ai** 提供OpenAI兼容API接口的代理服务器。支持GLM系列模型（GLM-4.5、GLM-4.6、Claude 4 Sonnet等），提供流式和非流式响应。
 
-> **注意**: 本项目来自fork  [OpenAI-Compatible-API-Proxy-for-Z](https://github.com/kbykb/OpenAI-Compatible-API-Proxy-for-Z)二次开发
+> **注意**: 本项目来自fork [OpenAI-Compatible-API-Proxy-for-Z](https://github.com/kbykb/OpenAI-Compatible-API-Proxy-for-Z) 二次开发
+
+## 🎯 最新特性
+
+### ✅ 双平台支持
+- **Z.ai** - 原有 GLM-4.6 模型支持
+- **zread.ai** - 新增 GLM-4.5、Claude 4 Sonnet 等模型支持
+- **自动平台检测** - 根据环境变量自动切换配置
+
+### ✅ 多实现版本
+- **Go版本** (`main.go`) - 高性能原生实现
+- **Deno版本** (`deno/zai/main.ts`) - 现代TypeScript实现
 
 ## 🎯 最新更新 (2025-09-30)
 
@@ -28,13 +39,15 @@ Z.ai在2025年9月30日更新了客户端验证机制，本项目已完成适配
 - 🌍 **CORS支持**: 支持跨域请求，便于前端集成
 - 📝 **思考过程展示**: 智能处理并展示模型的思考过程
 - 📊 **实时监控仪表板**: 提供Web仪表板，实时显示API转发情况和统计信息
+- 🆕 **双平台支持**: 支持 Z.ai 和 zread.ai 两个平台，自动切换配置
+- 🆕 **多模型支持**: 支持 GLM-4.5、GLM-4.6、Claude 4 Sonnet 等模型
 
 ## 🚀 快速开始
 
 ### 环境要求
 
-- Go 1.23 或更高版本
-- Z.ai 的访问令牌（可选，支持匿名模式）
+- Go 1.23 或更高版本 或 Deno 2.5+
+- Z.ai 或 zread.ai 的访问令牌（可选，支持匿名模式）
 
 ### 本地部署
 
@@ -45,10 +58,20 @@ Z.ai在2025年9月30日更新了客户端验证机制，本项目已完成适配
    ```
 
 2. **配置环境变量**
+
+   **使用 Z.ai (默认):**
    ```bash
    # 复制配置模板
    cp .env.example .env.local
-   # 编辑 .env.local 文件，根据需要修改配置
+   # 编辑配置文件
+   nano .env.local
+   ```
+
+   **使用 zread.ai:**
+   ```bash
+   # 复制 zread.ai 配置模板
+   cp .env.zread.example .env.local
+   # 编辑配置文件，填入你的 zread.ai token
    nano .env.local
    ```
 
@@ -90,6 +113,51 @@ Z.ai在2025年9月30日更新了客户端验证机制，本项目已完成适配
     - 实时显示API请求统计信息（总请求数、成功请求数、失败请求数、平均响应时间）
     - 显示最近100条请求的详细信息（时间、方法、路径、状态码、耗时、客户端IP）
     - 数据每5秒自动刷新一次
+
+## 🆕 zread.ai 平台支持
+
+### 支持的模型
+- **glm-4.5** - GLM-4.5 模型
+- **claude-4-sonnet** - Claude 4 Sonnet 模型
+- **gpt-4o** - GPT-4o 模型
+- 更多模型请参考配置文件中的 `UPSTREAM_MODEL_ID_MAP`
+
+### 快速配置 zread.ai
+
+1. **获取 Token**
+   ```bash
+   # 登录 https://zread.ai
+   # 在开发者工具中找到 Authorization: Bearer <token>
+   ```
+
+2. **配置环境**
+   ```bash
+   # 复制 zread.ai 配置模板
+   cp .env.zread.example .env.local
+
+   # 编辑配置文件
+   nano .env.local
+   ```
+
+3. **关键配置项**
+   ```env
+   PLATFORM_ID=zread
+   PROVIDER_HOME_URL=https://zread.ai
+   UPSTREAM_TOKEN=your_zread_token_here
+   MODEL_NAME=glm-4.5
+   ```
+
+4. **测试服务**
+   ```bash
+   # 使用测试脚本
+   ./test_zread.sh
+
+   # 或手动测试
+   curl -X POST http://localhost:9090/v1/chat/completions \
+     -H "Authorization: Bearer sk-your-key" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"glm-4.5","messages":[{"role":"user","content":"你好"}]}'
+   ```
 
 ### Docker部署
 

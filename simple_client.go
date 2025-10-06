@@ -29,7 +29,7 @@ func NewSimpleClient(authToken string) *SimpleClient {
 func (sc *SimpleClient) SendSimpleRequest(messages []Message, stream bool) (*http.Response, error) {
 	// 构建最简单的请求体
 	chatID := fmt.Sprintf("%d", time.Now().UnixNano())
-	
+
 	upstreamReq := UpstreamRequest{
 		Stream:   stream,
 		ChatID:   chatID,
@@ -61,7 +61,7 @@ func (sc *SimpleClient) SendSimpleRequest(messages []Message, stream bool) (*htt
 	req.Header.Set("User-Agent", BROWSER_UA)
 	req.Header.Set("Origin", ORIGIN_BASE)
 	req.Header.Set("Referer", ORIGIN_BASE+"/")
-	
+
 	// 如果有token，添加Authorization
 	if sc.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+sc.authToken)
@@ -76,7 +76,7 @@ func (sc *SimpleClient) SendSimpleRequest(messages []Message, stream bool) (*htt
 	}
 
 	debugLog("响应状态: %d %s", resp.StatusCode, resp.Status)
-	
+
 	// 如果响应不是200，读取错误信息
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

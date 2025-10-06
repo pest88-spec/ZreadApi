@@ -1,9 +1,9 @@
-// Shared configuration helpers for ZtoApi Deno services
-// Allows switching between chat.z.ai and zread.ai (or other compatible upstreams)
+// Shared configuration helpers for ZtoApi Deno services.
+// Supports multi-platform routing (e.g. chat.z.ai, zread.ai) based on model name.
 
 function ensureTrailingSlash(value: string): string {
   if (!value) return "/";
-  return value.endsWith("/") ? value : `${value}/`;
+  return value.endsWith("/") ? value : value + "/";
 }
 
 function stripTrailingSlash(value: string): string {
@@ -11,181 +11,400 @@ function stripTrailingSlash(value: string): string {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
-const PLATFORM_ID = Deno.env.get("PLATFORM_ID") || "zai";
-const PROVIDER_NAME = Deno.env.get("PROVIDER_NAME") || "Z.ai";
-const PROVIDER_BRAND = Deno.env.get("PROVIDER_BRAND") || PROVIDER_NAME;
-const PROVIDER_HOME_URL = Deno.env.get("PROVIDER_HOME_URL") || "https://chat.z.ai";
-const ORIGIN_BASE = Deno.env.get("ORIGIN_BASE") || PROVIDER_HOME_URL;
-const REFERER_PREFIX = Deno.env.get("REFERER_PREFIX") || "/c/";
-const REGISTER_BASE_URL = Deno.env.get("REGISTER_BASE_URL") || PROVIDER_HOME_URL;
-const REGISTER_SSO_REDIRECT = ensureTrailingSlash(
-  Deno.env.get("REGISTER_SSO_REDIRECT") || PROVIDER_HOME_URL,
-);
-const AUTH_URL = Deno.env.get("AUTH_URL") || `${stripTrailingSlash(ORIGIN_BASE)}/api/v1/auths/`;
-const MODELS_URL = Deno.env.get("MODELS_URL") || `${stripTrailingSlash(ORIGIN_BASE)}/api/models`;
-const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") ||
-  `${stripTrailingSlash(ORIGIN_BASE)}/api/chat/completions`;
-const OWNED_BY = Deno.env.get("OWNED_BY") || PROVIDER_NAME.toLowerCase();
-const X_FE_VERSION = Deno.env.get("X_FE_VERSION") || "prod-fe-1.0.94";
-const DEFAULT_KEY = Deno.env.get("DEFAULT_KEY") || "sk-your-key";
-const MODEL_NAME = Deno.env.get("MODEL_NAME") || "GLM-4.5";
-const PORT = parseInt(Deno.env.get("PORT") || "9090", 10);
-const DEBUG_MODE = (Deno.env.get("DEBUG_MODE") || "true").toLowerCase() === "true";
-const DEFAULT_STREAM = (Deno.env.get("DEFAULT_STREAM") || "true").toLowerCase() === "true";
-const DASHBOARD_ENABLED = (Deno.env.get("DASHBOARD_ENABLED") || "true").toLowerCase() === "true";
-const ENABLE_THINKING = (Deno.env.get("ENABLE_THINKING") || "false").toLowerCase() === "true";
-const KV_URL = Deno.env.get("KV_URL") || "";
-const UPSTREAM_TOKEN = Deno.env.get("UPSTREAM_TOKEN") || Deno.env.get("ZAI_TOKEN") || "";
-const TOKEN_HEADER = Deno.env.get("PLATFORM_TOKEN_HEADER") || "Authorization";
-const API_BASE = Deno.env.get("PLATFORM_API_BASE") || ORIGIN_BASE;
+function ensureLeadingSlash(value: string): string {
+  if (!value) return "/";
+  return value.startsWith("/") ? value : "/" + value;
+}
 
-function buildModelMap() {
-  const raw = Deno.env.get("UPSTREAM_MODEL_ID_MAP");
-  const map: Record<string, string> = {};
-  const keys: string[] = [];
-  if (!raw) {
-    return { map, keys };
-  }
+function parseJSONEnv<T>(value: string | null | undefined): T | null {
+  if (!value) return null;
   try {
-    const parsed = JSON.parse(raw);
-    for (const [key, value] of Object.entries(parsed)) {
-      const normalizedKey = String(key).trim();
-      if (!normalizedKey) continue;
-      keys.push(normalizedKey);
-      map[normalizedKey.toLowerCase()] = String(value);
-    }
+    return JSON.parse(value) as T;
   } catch (_error) {
-    console.warn(
-      "[config] Failed to parse UPSTREAM_MODEL_ID_MAP, falling back to default model id.",
-    );
+    console.warn("[config] Failed to parse JSON env variable");
+    return null;
   }
-  return { map, keys };
 }
-const { map: MODEL_ID_MAP, keys: MODEL_ID_MAP_KEYS } = buildModelMap();
-const DEFAULT_MODEL_ID = Deno.env.get("UPSTREAM_MODEL_ID_DEFAULT") || MODEL_NAME;
 
-const PROVIDER_HOST = (() => {
-  try {
-    return new URL(PROVIDER_HOME_URL).host || PROVIDER_HOME_URL;
-  } catch {
-    return PROVIDER_HOME_URL.replace(/^https?:\/\//, "");
+function parseDelimitedList(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split("|")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
+export interface PlatformSettings {
+  id: string;
+  brand: string;
+  homeUrl: string;
+  originBase: string;
+  apiBase: string;
+  chatUrl: string;
+  upstreamUrl: string;
+  modelsUrl: string;
+  authUrl: string;
+  refererPrefix: string;
+  ownedBy: string;
+  tokenHeader: string;
+  xFeVersion: string;
+  defaultUpstreamModelId?: string;
+}
+
+interface RawPlatformConfig {
+  id?: string;
+  name?: string;
+  brand?: string;
+  homeUrl?: string;
+  originBase?: string;
+  apiBase?: string;
+  refererPrefix?: string;
+  chatUrl?: string;
+  upstreamUrl?: string;
+  chatPath?: string;
+  modelsUrl?: string;
+  modelsPath?: string;
+  authUrl?: string;
+  authPath?: string;
+  ownedBy?: string;
+  tokenHeader?: string;
+  xFeVersion?: string;
+  defaultUpstreamModelId?: string;
+  defaultModel?: string;
+}
+
+interface ModelRouteInfo {
+  platformId: string;
+  clientModel: string;
+  upstreamModelId: string;
+}
+
+interface ModelRouteDefinition {
+  platform?: string;
+  upstream?: string;
+  alias?: string;
+}
+
+let DEFAULT_PLATFORM_ID_INTERNAL = (Deno.env.get("PLATFORM_ID") || "zai").toLowerCase();
+
+const platformMap = new Map<string, PlatformSettings>();
+
+const runtimeXFeVersion = Deno.env.get("X_FE_VERSION") || "prod-fe-1.0.94";
+
+const RuntimeConfig = {
+  defaultKey: Deno.env.get("DEFAULT_KEY") || "sk-your-key",
+  modelName: Deno.env.get("MODEL_NAME") || "GLM-4.5",
+  port: parseInt(Deno.env.get("PORT") || "9090", 10),
+  debugMode: (Deno.env.get("DEBUG_MODE") || "true").toLowerCase() === "true",
+  defaultStream: (Deno.env.get("DEFAULT_STREAM") || "true").toLowerCase() === "true",
+  dashboardEnabled: (Deno.env.get("DASHBOARD_ENABLED") || "true").toLowerCase() === "true",
+  enableThinking: (Deno.env.get("ENABLE_THINKING") || "false").toLowerCase() === "true",
+  kvUrl: Deno.env.get("KV_URL") || "",
+  upstreamToken: Deno.env.get("UPSTREAM_TOKEN") || Deno.env.get("ZAI_TOKEN") || "",
+  xFeVersion: runtimeXFeVersion,
+};
+
+function normalisePlatformConfig(raw: RawPlatformConfig, fallbackId?: string): PlatformSettings {
+  const id = (raw.id || fallbackId || DEFAULT_PLATFORM_ID_INTERNAL).toLowerCase();
+  const homeUrl = raw.homeUrl || raw.originBase || raw.apiBase || "https://chat.z.ai";
+
+  const originBase = stripTrailingSlash(raw.originBase || homeUrl);
+  const apiBase = stripTrailingSlash(raw.apiBase || originBase);
+  const refererPrefix = ensureLeadingSlash(raw.refererPrefix || "/c/");
+
+  const chatUrl = raw.chatUrl ||
+    `${apiBase}/api/chat/completions`;
+  const modelsUrl = raw.modelsUrl ||
+    `${apiBase}/v1/models`;
+  const authUrl = raw.authUrl ||
+    `${apiBase}/api/v1/auths/`;
+  const resolvedAuthUrl = raw.authUrl ||
+    `${apiBase}/api/v1/auths/`;
+  const xFeVersion = raw.xFeVersion || RuntimeConfig.xFeVersion;
+
+  const brand = raw.brand || raw.name || id.toUpperCase();
+  const ownedBy = raw.ownedBy || brand.toLowerCase();
+  const tokenHeader = raw.tokenHeader || "Authorization";
+  const defaultUpstreamModelId = raw.defaultUpstreamModelId || raw.defaultModel;
+
+  return {
+    id,
+    brand,
+    homeUrl,
+    originBase,
+    apiBase,
+    chatUrl,
+    upstreamUrl: raw.upstreamUrl || chatUrl,
+    modelsUrl,
+    authUrl: resolvedAuthUrl,
+    refererPrefix,
+    ownedBy,
+    tokenHeader,
+    xFeVersion,
+    defaultUpstreamModelId,
+  };
+}
+
+function registerPlatform(raw: RawPlatformConfig, fallbackId?: string) {
+  const platform = normalisePlatformConfig(raw, fallbackId);
+  platformMap.set(platform.id, platform);
+}
+
+function loadPlatformConfigs() {
+  const envValue = Deno.env.get("PLATFORM_CONFIGS");
+  const parsed = parseJSONEnv<Record<string, RawPlatformConfig> | RawPlatformConfig[]>(envValue);
+
+  if (parsed) {
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (!entry) continue;
+        registerPlatform(entry, entry.id);
+      }
+    } else {
+      for (const [id, entry] of Object.entries(parsed)) {
+        registerPlatform({ ...entry, id });
+      }
+    }
   }
-})();
 
-export const PlatformConfig = {
-  id: PLATFORM_ID,
-  name: PROVIDER_NAME,
-  brand: PROVIDER_BRAND,
-  homeUrl: PROVIDER_HOME_URL,
-  host: PROVIDER_HOST,
-  originBase: ORIGIN_BASE,
-  refererPrefix: REFERER_PREFIX,
-  registerBaseUrl: REGISTER_BASE_URL,
-  registerSsoRedirect: REGISTER_SSO_REDIRECT,
-  authUrl: AUTH_URL,
-  modelsUrl: MODELS_URL,
-  upstreamUrl: UPSTREAM_URL,
-  apiBase: API_BASE,
-  ownedBy: OWNED_BY,
-  tokenHeader: TOKEN_HEADER,
-  defaultModelId: DEFAULT_MODEL_ID,
-  modelIdMap: MODEL_ID_MAP,
-  modelAliases: MODEL_ID_MAP_KEYS,
-};
+  if (platformMap.size === 0) {
+    // Auto-detect platform based on environment variables
+    const platformId = DEFAULT_PLATFORM_ID_INTERNAL;
+    const isZread = platformId === "zread" ||
+                   (Deno.env.get("PROVIDER_HOME_URL") || "").includes("zread.ai") ||
+                   (Deno.env.get("ORIGIN_BASE") || "").includes("zread.ai");
 
-export const RuntimeConfig = {
-  xFeVersion: X_FE_VERSION,
-  defaultKey: DEFAULT_KEY,
-  modelName: MODEL_NAME,
-  port: PORT,
-  debugMode: DEBUG_MODE,
-  defaultStream: DEFAULT_STREAM,
-  dashboardEnabled: DASHBOARD_ENABLED,
-  enableThinking: ENABLE_THINKING,
-  kvUrl: KV_URL,
-  upstreamToken: UPSTREAM_TOKEN,
-};
+    const defaultConfig = isZread ? {
+      id: "zread",
+      name: "zread.ai",
+      brand: "zread.ai",
+      homeUrl: "https://zread.ai",
+      originBase: "https://zread.ai",
+      apiBase: "https://zread.ai",
+      refererPrefix: "/chat/",
+      ownedBy: "zread.ai",
+      defaultUpstreamModelId: "glm-4.5",
+    } : {
+      id: "zai",
+      name: "Z.ai",
+      brand: "Z.ai",
+      homeUrl: "https://chat.z.ai",
+      originBase: "https://chat.z.ai",
+      apiBase: "https://chat.z.ai",
+      refererPrefix: "/c/",
+      ownedBy: "z.ai",
+      defaultUpstreamModelId: "0727-360B-API",
+    };
 
-export function normalizeOrigin(value: string): string {
-  return stripTrailingSlash(value);
+    registerPlatform({
+      ...defaultConfig,
+      id: platformId,
+      name: Deno.env.get("PROVIDER_NAME") || defaultConfig.name,
+      brand: Deno.env.get("PROVIDER_BRAND") || defaultConfig.brand,
+      homeUrl: Deno.env.get("PROVIDER_HOME_URL") || defaultConfig.homeUrl,
+      originBase: Deno.env.get("ORIGIN_BASE") || defaultConfig.originBase,
+      apiBase: Deno.env.get("PLATFORM_API_BASE") || defaultConfig.apiBase,
+      refererPrefix: Deno.env.get("REFERER_PREFIX") || defaultConfig.refererPrefix,
+      modelsUrl: Deno.env.get("MODELS_URL"),
+      authUrl: Deno.env.get("AUTH_URL"),
+      chatUrl: Deno.env.get("UPSTREAM_URL"),
+      upstreamUrl: Deno.env.get("UPSTREAM_URL"),
+      ownedBy: Deno.env.get("OWNED_BY") || defaultConfig.ownedBy,
+      tokenHeader: Deno.env.get("PLATFORM_TOKEN_HEADER") || "Authorization",
+      xFeVersion: Deno.env.get("X_FE_VERSION") || RuntimeConfig.xFeVersion,
+      defaultUpstreamModelId: Deno.env.get("UPSTREAM_MODEL_ID_DEFAULT") || defaultConfig.defaultUpstreamModelId,
+    });
+  }
+
+  if (!platformMap.has(DEFAULT_PLATFORM_ID_INTERNAL)) {
+    const first = platformMap.values().next();
+    if (first.done) {
+      throw new Error("No platform configuration is available");
+    }
+    DEFAULT_PLATFORM_ID_INTERNAL = first.value.id;
+  }
 }
 
-export function buildReferer(chatId: string): string {
-  const prefix = PlatformConfig.refererPrefix.endsWith("/")
-    ? PlatformConfig.refererPrefix
-    : `${PlatformConfig.refererPrefix}/`;
-  return `${normalizeOrigin(PlatformConfig.originBase)}${prefix}${chatId}`;
+loadPlatformConfigs();
+
+export const DEFAULT_PLATFORM_ID = DEFAULT_PLATFORM_ID_INTERNAL;
+
+export function getPlatform(id: string): PlatformSettings {
+  const platform = platformMap.get(id.toLowerCase());
+  if (!platform) {
+    throw new Error();
+  }
+  return platform;
 }
 
-export function generateBrowserHeaders(chatId: string, authToken: string): Record<string, string> {
-  const chromeVersion = Math.floor(Math.random() * 3) + 138;
-  const userAgents = [
-    `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`,
-    `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`,
-    `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`,
-  ];
-  const platforms = ['"Windows"', '"macOS"', '"Linux"'];
-  const ua = userAgents[Math.floor(Math.random() * userAgents.length)];
-  const platform = platforms[Math.floor(Math.random() * platforms.length)];
-  const origin = normalizeOrigin(PlatformConfig.originBase);
+export function getDefaultPlatform(): PlatformSettings {
+  return getPlatform(DEFAULT_PLATFORM_ID);
+}
 
+function clonePlatform(platform: PlatformSettings): PlatformSettings {
+  return { ...platform };
+}
+
+// Static token registry per platform
+const platformStaticTokens = new Map<string, string[]>();
+
+function registerPlatformToken(id: string, tokens: string[]) {
+  const lower = id.toLowerCase();
+  const existing = platformStaticTokens.get(lower) || [];
+  const merged = new Set([...existing, ...tokens.filter(Boolean)]);
+  platformStaticTokens.set(lower, Array.from(merged));
+}
+
+function loadStaticTokens() {
+  const tokenMapRaw = parseJSONEnv<Record<string, string | string[]>>(Deno.env.get("PLATFORM_TOKEN_MAP"));
+  if (tokenMapRaw) {
+    for (const [id, value] of Object.entries(tokenMapRaw)) {
+      if (Array.isArray(value)) {
+        registerPlatformToken(id, value.map((token) => token.trim()));
+      } else if (typeof value === "string") {
+        registerPlatformToken(id, parseDelimitedList(value));
+      }
+    }
+  }
+
+  for (const [id] of platformMap) {
+    const upper = id.toUpperCase();
+    const single = Deno.env.get(`${upper}_TOKEN`);
+    if (single) registerPlatformToken(id, [single.trim()]);
+    const multi = Deno.env.get(`${upper}_TOKENS`);
+    if (multi) registerPlatformToken(id, parseDelimitedList(multi));
+  }
+
+  const legacyTokens = parseDelimitedList(Deno.env.get("ZAI_TOKEN"));
+  if (legacyTokens.length > 0) {
+    registerPlatformToken(DEFAULT_PLATFORM_ID, legacyTokens);
+  }
+  const upstreamToken = RuntimeConfig.upstreamToken;
+  if (upstreamToken) {
+    registerPlatformToken(DEFAULT_PLATFORM_ID, [upstreamToken]);
+  }
+}
+
+loadStaticTokens();
+
+export function getStaticTokens(platformId: string): string[] {
+  return platformStaticTokens.get(platformId.toLowerCase()) ?? [];
+}
+
+// Model routing configuration
+const modelRouteMap = new Map<string, ModelRouteInfo>();
+
+function registerModelRoute(clientModel: string, platformId: string, upstreamModelId?: string) {
+  const trimmedModel = clientModel.trim();
+  if (!trimmedModel) return;
+  const normalizedKey = trimmedModel.toLowerCase();
+  const normalizedPlatform = platformId.toLowerCase();
+  const upstream = (upstreamModelId || trimmedModel).trim();
+  modelRouteMap.set(normalizedKey, {
+    platformId: normalizedPlatform,
+    clientModel: trimmedModel,
+    upstreamModelId: upstream,
+  });
+}
+
+function loadModelRoutes() {
+  const explicitMap = parseJSONEnv<Record<string, string | ModelRouteDefinition>>(Deno.env.get("MODEL_PLATFORM_MAP"));
+  if (explicitMap) {
+    for (const [modelName, value] of Object.entries(explicitMap)) {
+      if (typeof value === "string") {
+        registerModelRoute(modelName, value, undefined);
+      } else if (value) {
+        const platformId = value.platform || DEFAULT_PLATFORM_ID;
+        const alias = value.alias || modelName;
+        registerModelRoute(alias, platformId, value.upstream || modelName);
+      }
+    }
+  }
+
+  if (modelRouteMap.size === 0) {
+    const legacyMap = parseJSONEnv<Record<string, string>>(Deno.env.get("UPSTREAM_MODEL_ID_MAP"));
+    if (legacyMap) {
+      for (const [modelName, upstream] of Object.entries(legacyMap)) {
+        registerModelRoute(modelName, DEFAULT_PLATFORM_ID, upstream);
+      }
+    }
+  }
+
+  if (!modelRouteMap.has(RuntimeConfig.modelName.toLowerCase())) {
+    registerModelRoute(RuntimeConfig.modelName, DEFAULT_PLATFORM_ID, undefined);
+  }
+}
+
+loadModelRoutes();
+
+const platformDefaultModels = new Map<string, string>();
+for (const route of modelRouteMap.values()) {
+  if (!platformDefaultModels.has(route.platformId)) {
+    platformDefaultModels.set(route.platformId, route.upstreamModelId);
+  }
+}
+
+for (const [id, platform] of platformMap.entries()) {
+  const candidate = platform.defaultUpstreamModelId || platformDefaultModels.get(id);
+  if (candidate) {
+    platform.defaultUpstreamModelId = candidate;
+  }
+}
+
+export interface ModelResolution {
+  platform: PlatformSettings;
+  platformId: string;
+  clientModel: string;
+  upstreamModelId: string;
+}
+
+export function resolveModelRouting(requestedModel?: string): ModelResolution {
+  const input = requestedModel?.trim();
+  const key = input?.toLowerCase() || RuntimeConfig.modelName.toLowerCase();
+  const route = modelRouteMap.get(key);
+  const platformId = route?.platformId || DEFAULT_PLATFORM_ID;
+  const platform = clonePlatform(getPlatform(platformId));
+  const clientModel = route?.clientModel || input || RuntimeConfig.modelName;
+  const upstreamModelId = route?.upstreamModelId || platform.defaultUpstreamModelId || clientModel;
   return {
-    Accept: "*/*",
-    "Content-Type": "application/json",
-    "User-Agent": ua,
-    Authorization: `Bearer ${authToken}`,
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-    "Accept-Encoding": "gzip, deflate, br, zstd",
-    "sec-ch-ua":
-      `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="24", "Google Chrome";v="${chromeVersion}"`,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": platform,
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    "X-FE-Version": RuntimeConfig.xFeVersion,
-    Origin: origin,
-    Referer: buildReferer(chatId),
-    Priority: "u=1, i",
+    platform,
+    platformId,
+    clientModel,
+    upstreamModelId,
   };
 }
 
-export function resolveUpstreamModel(requestedModel?: string) {
-  const normalizedInput = (requestedModel?.trim() || RuntimeConfig.modelName).toString();
-  const lookupKey = normalizedInput.toLowerCase();
-  const map = PlatformConfig.modelIdMap as Record<string, string>;
-  const aliasList = PlatformConfig.modelAliases as string[] | undefined;
-  const upstreamId = map[lookupKey] || PlatformConfig.defaultModelId || normalizedInput;
-  const displayName = aliasList?.find((alias) => alias.toLowerCase() === lookupKey) ||
-    normalizedInput;
+export interface ExposedModelInfo {
+  id: string;
+  platformId: string;
+  upstreamModelId: string;
+}
+
+export function listExposedModels(): ExposedModelInfo[] {
+  const seen = new Map<string, ExposedModelInfo>();
+  for (const route of modelRouteMap.values()) {
+    if (!seen.has(route.clientModel)) {
+      seen.set(route.clientModel, {
+        id: route.clientModel,
+        platformId: route.platformId,
+        upstreamModelId: route.upstreamModelId,
+      });
+    }
+  }
+  return Array.from(seen.values());
+}
+
+// Legacy function for backward compatibility
+export function resolveUpstreamModel(requestedModel?: string): {
+  requestedModel: string;
+  upstreamModelId: string;
+} {
+  const resolution = resolveModelRouting(requestedModel);
   return {
-    requestedModel: displayName,
-    upstreamModelId: upstreamId,
+    requestedModel: resolution.clientModel,
+    upstreamModelId: resolution.upstreamModelId,
   };
 }
 
-export function buildDefaultHeaders(): HeadersInit {
-  return {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    "User-Agent": generateBrowserHeaders("", "")["User-Agent"] ??
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-  };
-}
-
-export function makeAccountKey(email: string, timestamp: number) {
-  return ["accounts", PlatformConfig.id, timestamp, email] as const;
-}
-
-export function accountPrefix() {
-  return ["accounts", PlatformConfig.id] as const;
-}
-
-export function automationLogPrefix() {
-  return ["automation_logs", PlatformConfig.id] as const;
-}
-
-export const RegisterConfig = {
-  baseUrl: REGISTER_BASE_URL,
-  ssoRedirect: REGISTER_SSO_REDIRECT,
-};
+export { RuntimeConfig };
+export const PlatformConfig = getDefaultPlatform();

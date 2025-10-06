@@ -15,19 +15,46 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/libaxuan/ZtoApi/src/adapters"
 )
+
+// 平台配置结构
+type PlatformConfig struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	HomeURL           string `json:"home_url"`
+	OriginBase        string `json:"origin_base"`
+	APIBase           string `json:"api_base"`
+	AuthURL           string `json:"auth_url"`
+	TokenHeader       string `json:"token_header"`
+	RefererPrefix     string `json:"referer_prefix"`
+	XFeVersion        string `json:"x_fe_version"`
+	UpstreamURL       string `json:"upstream_url"`
+	DefaultModelID    string `json:"default_model_id"`
+	Token             string `json:"token"`
+	UsesTwoStepAPI    bool   `json:"uses_two_step_api"`
+}
+
+// 模型路由信息
+type ModelRoute struct {
+	Platform       string `json:"platform"`
+	UpstreamModel  string `json:"upstream"`
+}
 
 // 配置变量（从环境变量读取）
 var (
-	UPSTREAM_URL      string
 	DEFAULT_KEY       string
-	ZAI_TOKEN         string
 	MODEL_NAME        string
 	PORT              string
 	DEBUG_MODE        bool
 	DEFAULT_STREAM    bool
 	DASHBOARD_ENABLED bool
 	ENABLE_THINKING   bool
+
+	// 多平台配置
+	Platforms         map[string]PlatformConfig
+	ModelPlatformMap  map[string]ModelRoute
 )
 
 // 请求统计信息
@@ -65,21 +92,21 @@ const (
 
 // 系统配置常量
 const (
-	MAX_LIVE_REQUESTS     = 100 // 最多保留的实时请求记录数
-	AUTH_TOKEN_TIMEOUT    = 10  // 获取匿名token的超时时间（秒）
-	UPSTREAM_TIMEOUT      = 60  // 上游API调用超时时间（秒）
-	TOKEN_DISPLAY_LENGTH  = 10  // token显示时的截取长度
+	MAX_LIVE_REQUESTS      = 100        // 最多保留的实时请求记录数
+	AUTH_TOKEN_TIMEOUT     = 10         // 获取匿名token的超时时间（秒）
+	UPSTREAM_TIMEOUT       = 60         // 上游API调用超时时间（秒）
+	TOKEN_DISPLAY_LENGTH   = 10         // token显示时的截取长度
 	NANOSECONDS_TO_SECONDS = 1000000000 // 纳秒转秒的倍数
 )
 
 // 伪装前端头部（2025-09-30 更新：修复426错误）
 const (
-	X_FE_VERSION   = "prod-fe-1.0.94" // 更新：1.0.70 → 1.0.94
+	X_FE_VERSION   = "prod-fe-1.0.94"                                                                                                  // 更新：1.0.70 → 1.0.94
 	BROWSER_UA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36" // 更新：Chrome 139 → 140
-	SEC_CH_UA      = "\"Chromium\";v=\"140\", \"Not=A?Brand\";v=\"24\", \"Google Chrome\";v=\"140\"" // 更新：Chrome 140
+	SEC_CH_UA      = "\"Chromium\";v=\"140\", \"Not=A?Brand\";v=\"24\", \"Google Chrome\";v=\"140\""                                   // 更新：Chrome 140
 	SEC_CH_UA_MOB  = "?0"
 	SEC_CH_UA_PLAT = "\"Windows\""
-	ORIGIN_BASE    = "https://chat.z.ai"
+	// ORIGIN_BASE 将在 initConfig() 中动态设置
 )
 
 // 匿名token开关
@@ -91,22 +118,337 @@ func initConfig() {
 	loadEnvFile(".env.local")
 	// 也尝试加载标准的 .env 文件
 	loadEnvFile(".env")
-	
-	UPSTREAM_URL = getEnv("UPSTREAM_URL", "https://chat.z.ai/api/chat/completions")
-	DEFAULT_KEY = getEnv("DEFAULT_KEY", "sk-your-key")
-	ZAI_TOKEN = getEnv("ZAI_TOKEN", "")
-	MODEL_NAME = getEnv("MODEL_NAME", "GLM-4.6")
-	PORT = getEnv("PORT", "9090")
 
-	// 处理PORT格式，确保有冒号前缀
+	// 初始化多平台配置
+	Platforms = make(map[string]PlatformConfig)
+	ModelPlatformMap = make(map[string]ModelRoute)
+
+	// 加载基础配置
+	DEFAULT_KEY = getEnv("DEFAULT_KEY", "sk-your-key")
+	MODEL_NAME = getEnv("MODEL_NAME", "glm-4.5")
+	PORT = getEnv("PORT", "9090")
 	if !strings.HasPrefix(PORT, ":") {
 		PORT = ":" + PORT
 	}
-
 	DEBUG_MODE = getEnv("DEBUG_MODE", "true") == "true"
 	DEFAULT_STREAM = getEnv("DEFAULT_STREAM", "true") == "true"
 	DASHBOARD_ENABLED = getEnv("DASHBOARD_ENABLED", "true") == "true"
 	ENABLE_THINKING = getEnv("ENABLE_THINKING", "false") == "true"
+
+	// 加载 Z.ai 平台配置
+	Platforms["zai"] = PlatformConfig{
+		ID:             "zai",
+		Name:           "Z.ai",
+		HomeURL:        getEnv("ZAI_HOME_URL", "https://chat.z.ai"),
+		OriginBase:     getEnv("ZAI_ORIGIN_BASE", "https://chat.z.ai"),
+		APIBase:        getEnv("ZAI_API_BASE", "https://chat.z.ai"),
+		AuthURL:        getEnv("ZAI_AUTH_URL", "https://chat.z.ai/api/v1/auths/"),
+		TokenHeader:    getEnv("ZAI_TOKEN_HEADER", "Authorization"),
+		RefererPrefix:  getEnv("ZAI_REFERER_PREFIX", "/c/"),
+		XFeVersion:     getEnv("ZAI_X_FE_VERSION", "prod-fe-1.0.94"),
+		UpstreamURL:    getEnv("ZAI_UPSTREAM_URL", "https://chat.z.ai/api/chat/completions"),
+		DefaultModelID: getEnv("ZAI_UPSTREAM_MODEL_ID_DEFAULT", "0727-360B-API"),
+		Token:          getEnv("ZAI_TOKEN", ""),
+		UsesTwoStepAPI: false,
+	}
+
+	// 加载 zread.ai 平台配置
+	Platforms["zread"] = PlatformConfig{
+		ID:             "zread",
+		Name:           "zread.ai",
+		HomeURL:        getEnv("ZREAD_HOME_URL", "https://zread.ai"),
+		OriginBase:     getEnv("ZREAD_ORIGIN_BASE", "https://zread.ai"),
+		APIBase:        getEnv("ZREAD_API_BASE", "https://zread.ai"),
+		AuthURL:        getEnv("ZREAD_AUTH_URL", ""),
+		TokenHeader:    getEnv("ZREAD_TOKEN_HEADER", "Authorization"),
+		RefererPrefix:  getEnv("ZREAD_REFERER_PREFIX", "/openai/codex"),
+		XFeVersion:     getEnv("ZREAD_X_FE_VERSION", "prod-fe-1.0.94"),
+		UpstreamURL:    getEnv("ZREAD_UPSTREAM_URL", "https://zread.ai/api/v1/talk"),
+		DefaultModelID: getEnv("ZREAD_UPSTREAM_MODEL_ID_DEFAULT", "glm-4.5"),
+		Token:          getEnv("ZREAD_TOKEN", ""),
+		UsesTwoStepAPI: true,
+	}
+
+	// 加载模型到平台的映射
+	loadModelPlatformMap()
+
+	debugLog(fmt.Sprintf("已加载 %d 个平台配置", len(Platforms)))
+	debugLog(fmt.Sprintf("已加载 %d 个模型路由", len(ModelPlatformMap)))
+}
+
+// 加载模型到平台的映射配置
+func loadModelPlatformMap() {
+	modelPlatformMapStr := getEnv("MODEL_PLATFORM_MAP", "")
+	if modelPlatformMapStr == "" {
+		// 使用默认映射
+		ModelPlatformMap["glm-4.5"] = ModelRoute{Platform: "zread", UpstreamModel: "glm-4.5"}
+		ModelPlatformMap["claude-4-sonnet"] = ModelRoute{Platform: "zread", UpstreamModel: "claude-4-sonnet"}
+		ModelPlatformMap["gpt-4o"] = ModelRoute{Platform: "zread", UpstreamModel: "gpt-4o"}
+		ModelPlatformMap["GLM-4.6"] = ModelRoute{Platform: "zai", UpstreamModel: "0727-360B-API"}
+		return
+	}
+
+	// 解析 JSON 配置
+	var configMap map[string]map[string]interface{}
+	if err := json.Unmarshal([]byte(modelPlatformMapStr), &configMap); err != nil {
+		debugLog(fmt.Sprintf("解析 MODEL_PLATFORM_MAP 失败: %v，使用默认配置", err))
+		// 使用默认映射
+		ModelPlatformMap["glm-4.5"] = ModelRoute{Platform: "zread", UpstreamModel: "glm-4.5"}
+		ModelPlatformMap["GLM-4.6"] = ModelRoute{Platform: "zai", UpstreamModel: "0727-360B-API"}
+		return
+	}
+
+	// 解析映射配置
+	for model, config := range configMap {
+		platform, ok := config["platform"].(string)
+		if !ok {
+			continue
+		}
+		upstream, ok := config["upstream"].(string)
+		if !ok {
+			upstream = model
+		}
+		ModelPlatformMap[model] = ModelRoute{Platform: platform, UpstreamModel: upstream}
+	}
+}
+
+// 根据模型名称解析平台和上游配置
+func resolveModelPlatform(modelName string) (PlatformConfig, ModelRoute, error) {
+	// 查找模型路由
+	route, exists := ModelPlatformMap[modelName]
+	if !exists {
+		// 如果没有找到，使用默认模型的路由
+		defaultRoute, defaultExists := ModelPlatformMap[MODEL_NAME]
+		if !defaultExists {
+			// 如果默认模型也没有，使用第一个可用的平台
+			for _, platform := range Platforms {
+				return platform, ModelRoute{Platform: platform.ID, UpstreamModel: platform.DefaultModelID}, nil
+			}
+			return PlatformConfig{}, ModelRoute{}, fmt.Errorf("没有可用的平台配置")
+		}
+		route = defaultRoute
+	}
+
+	// 获取平台配置
+	platform, exists := Platforms[route.Platform]
+	if !exists {
+		return PlatformConfig{}, ModelRoute{}, fmt.Errorf("平台配置不存在: %s", route.Platform)
+	}
+
+	return platform, route, nil
+}
+
+// 为特定平台获取匿名token
+func getAnonymousTokenForPlatform(platform PlatformConfig) (string, error) {
+	if platform.AuthURL == "" {
+		return "", fmt.Errorf("平台 %s 不支持匿名token", platform.Name)
+	}
+
+	// 使用现有的getAnonymousToken逻辑，但使用平台特定的URL
+	// 这里需要修改getAnonymousToken函数或创建新的版本
+	return getAnonymousTokenWithURL(platform.AuthURL)
+}
+
+// 使用指定URL获取匿名token
+func getAnonymousTokenWithURL(authURL string) (string, error) {
+	// 基于现有的getAnonymousToken逻辑，但使用自定义URL
+	client := &http.Client{Timeout: time.Duration(AUTH_TOKEN_TIMEOUT) * time.Second}
+
+	req, err := http.NewRequest("POST", authURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("创建匿名token请求失败: %w", err)
+	}
+
+	// 设置浏览器伪装头部
+	req.Header.Set("User-Agent", BROWSER_UA)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Origin", "https://chat.z.ai") // 这里可能需要动态设置
+	req.Header.Set("Referer", "https://chat.z.ai/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("获取匿名token失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取匿名token响应失败: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("匿名token请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	// 解析响应获取token
+	var tokenResp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", fmt.Errorf("解析匿名token响应失败: %w", err)
+	}
+
+	if tokenResp.Token == "" {
+		return "", fmt.Errorf("响应中没有找到token")
+	}
+
+	return tokenResp.Token, nil
+}
+
+// 为支持两步API的平台处理聊天完成请求
+func handleZreadChatCompletionWithPlatform(w http.ResponseWriter, r *http.Request, req OpenAIRequest, startTime time.Time, path string, clientIP, userAgent string, platform PlatformConfig, route ModelRoute) {
+	debugLog("开始处理 zread.ai 聊天完成请求")
+
+	// 创建zread.ai适配器
+	adapter := adapters.NewZreadAdapter(platform.UpstreamURL, platform.Token)
+
+	// 转换消息格式
+	messages := make([]map[string]string, len(req.Messages))
+	for i, msg := range req.Messages {
+		messages[i] = map[string]string{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+	}
+
+	// 调用zread.ai API
+	responseStream, err := adapter.ChatCompletion(route.UpstreamModel, messages, req.Stream)
+	if err != nil {
+		debugLog("zread.ai 非流式请求失败: %v", err)
+		http.Error(w, fmt.Sprintf("zread.ai request failed: %v", err), http.StatusInternalServerError)
+		duration := time.Since(startTime)
+		recordRequestStats(startTime, path, http.StatusInternalServerError)
+		addLiveRequest(r.Method, path, http.StatusInternalServerError, duration, "", userAgent)
+		return
+	}
+	defer responseStream.Close()
+
+	// 处理响应
+	if req.Stream {
+		// 流式响应处理
+		handleZreadStreamResponse(w, responseStream, startTime, path, clientIP, userAgent, platform)
+	} else {
+		// 非流式响应处理
+		handleZreadNonStreamResponse(w, responseStream, startTime, path, clientIP, userAgent, platform)
+	}
+}
+
+// 处理zread.ai流式响应
+func handleZreadStreamResponse(w http.ResponseWriter, responseStream io.ReadCloser, startTime time.Time, path string, clientIP, userAgent string, platform PlatformConfig) {
+	// 设置响应头
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+	// 创建流式写入器
+	flusher, _ := w.(http.Flusher)
+
+	// 读取zread.ai的SSE流并转换为OpenAI格式
+	scanner := bufio.NewScanner(responseStream)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// 跳过空行
+		if line == "" {
+			continue
+		}
+
+		// 处理SSE数据
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+
+			// 跳过结束标记
+			if data == "[DONE]" {
+				break
+			}
+
+			// 这里需要解析zread.ai的响应格式并转换为OpenAI格式
+			// 暂时使用简化的处理方式
+			chunk := map[string]interface{}{
+				"id":   fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				"object": "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model": MODEL_NAME,
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"delta": map[string]interface{}{
+							"content": data,
+						},
+						"finish_reason": nil,
+					},
+				},
+			}
+
+			chunkJSON, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", string(chunkJSON))
+			flusher.Flush()
+		}
+	}
+
+	// 发送结束标记
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+
+	// 记录统计
+	duration := time.Since(startTime)
+	recordRequestStats(startTime, path, http.StatusOK)
+	addLiveRequest("POST", path, http.StatusOK, duration, platform.ID, userAgent)
+
+	debugLog("zread.ai 流式响应处理完成，耗时: %v", duration)
+}
+
+// 处理zread.ai非流式响应
+func handleZreadNonStreamResponse(w http.ResponseWriter, responseStream io.ReadCloser, startTime time.Time, path string, clientIP, userAgent string, platform PlatformConfig) {
+	// 读取完整响应
+	body, err := io.ReadAll(responseStream)
+	if err != nil {
+		debugLog("读取zread.ai响应失败: %v", err)
+		http.Error(w, "Failed to read response", http.StatusInternalServerError)
+		duration := time.Since(startTime)
+		recordRequestStats(startTime, path, http.StatusInternalServerError)
+		addLiveRequest("POST", path, http.StatusInternalServerError, duration, platform.ID, userAgent)
+		return
+	}
+
+	// 这里需要解析zread.ai的响应格式并转换为OpenAI格式
+	// 暂时使用简化的处理方式
+	response := map[string]interface{}{
+		"id": fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object": "chat.completion",
+		"created": time.Now().Unix(),
+		"model": MODEL_NAME,
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role": "assistant",
+					"content": string(body),
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens": 0,
+			"completion_tokens": 0,
+			"total_tokens": 0,
+		},
+	}
+
+	responseJSON, _ := json.Marshal(response)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(responseJSON)
+
+	// 记录统计
+	duration := time.Since(startTime)
+	recordRequestStats(startTime, path, http.StatusOK)
+	addLiveRequest("POST", path, http.StatusOK, duration, platform.ID, userAgent)
+
+	debugLog("zread.ai 非流式响应处理完成，耗时: %v", duration)
 }
 
 // 记录请求统计信息
@@ -209,7 +551,7 @@ func loadEnvFile(filename string) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		
+
 		// 解析 KEY=VALUE 格式
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
@@ -360,7 +702,7 @@ func transformThinkingContent(s string) string {
 	s = strings.ReplaceAll(s, "<Full>", "")
 	s = strings.ReplaceAll(s, "</Full>", "")
 	s = strings.TrimSpace(s)
-	
+
 	switch THINK_TAGS_MODE {
 	case "think":
 		s = regexp.MustCompile(`<details[^>]*>`).ReplaceAllString(s, "<think>")
@@ -369,7 +711,7 @@ func transformThinkingContent(s string) string {
 		s = regexp.MustCompile(`<details[^>]*>`).ReplaceAllString(s, "")
 		s = strings.ReplaceAll(s, "</details>", "")
 	}
-	
+
 	// 处理每行前缀 "> "（包括起始位置）
 	s = strings.TrimPrefix(s, "> ")
 	s = strings.ReplaceAll(s, "\n> ", "\n")
@@ -389,40 +731,12 @@ func getUpstreamModelID(modelName string) string {
 
 // 获取匿名token（每次对话使用不同token，避免共享记忆）
 func getAnonymousToken() (string, error) {
-	client := &http.Client{Timeout: AUTH_TOKEN_TIMEOUT * time.Second}
-	req, err := http.NewRequest("GET", ORIGIN_BASE+"/api/v1/auths/", nil)
-	if err != nil {
-		return "", err
+	// 使用默认的Z.ai平台配置
+	zaiPlatform, exists := Platforms["zai"]
+	if !exists {
+		return "", fmt.Errorf("Z.ai平台配置不存在")
 	}
-	// 伪装浏览器头
-	req.Header.Set("User-Agent", BROWSER_UA)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
-	req.Header.Set("X-FE-Version", X_FE_VERSION)
-	req.Header.Set("sec-ch-ua", SEC_CH_UA)
-	req.Header.Set("sec-ch-ua-mobile", SEC_CH_UA_MOB)
-	req.Header.Set("sec-ch-ua-platform", SEC_CH_UA_PLAT)
-	req.Header.Set("Origin", ORIGIN_BASE)
-	req.Header.Set("Referer", ORIGIN_BASE+"/")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("anon token status=%d", resp.StatusCode)
-	}
-	var body struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", err
-	}
-	if body.Token == "" {
-		return "", fmt.Errorf("anon token empty")
-	}
-	return body.Token, nil
+	return getAnonymousTokenForPlatform(zaiPlatform)
 }
 
 func main() {
@@ -445,7 +759,10 @@ func main() {
 
 	log.Printf("OpenAI兼容API服务器启动在端口%s", PORT)
 	log.Printf("模型: %s", MODEL_NAME)
-	log.Printf("上游: %s", UPSTREAM_URL)
+	// 显示默认平台的上游地址
+	if defaultPlatform, exists := Platforms["zai"]; exists {
+		log.Printf("上游: %s", defaultPlatform.UpstreamURL)
+	}
 	log.Printf("API密钥: %s", func() string {
 		if len(DEFAULT_KEY) > TOKEN_DISPLAY_LENGTH {
 			return DEFAULT_KEY[:TOKEN_DISPLAY_LENGTH] + "..."
@@ -1486,12 +1803,32 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		debugLog("使用环境变量中的思考功能设置: %v", enableThinking)
 	}
 
+	// 根据模型名称动态解析平台配置
+	platform, route, err := resolveModelPlatform(req.Model)
+	if err != nil {
+		debugLog("平台解析失败: %v", err)
+		http.Error(w, fmt.Sprintf("Platform resolution failed: %v", err), http.StatusInternalServerError)
+		duration := time.Since(startTime)
+		recordRequestStats(startTime, path, http.StatusInternalServerError)
+		addLiveRequest(r.Method, path, http.StatusInternalServerError, duration, "", userAgent)
+		return
+	}
+
+	debugLog("模型 %s 路由到平台 %s，上游模型: %s", req.Model, platform.Name, route.UpstreamModel)
+
+	// 根据平台类型处理请求
+	if platform.UsesTwoStepAPI {
+		debugLog("使用 zread.ai 两步 API 适配器处理请求")
+		handleZreadChatCompletionWithPlatform(w, r, req, startTime, path, clientIP, userAgent, platform, route)
+		return
+	}
+
 	// 构造上游请求
 	upstreamReq := UpstreamRequest{
 		Stream:   true, // 总是使用流式从上游获取
 		ChatID:   chatID,
 		ID:       msgID,
-		Model:    getUpstreamModelID(MODEL_NAME), // 根据模型名称获取上游实际模型ID
+		Model:    route.UpstreamModel, // 使用解析到的上游模型ID
 		Messages: req.Messages,
 		Params:   map[string]interface{}{},
 		Features: map[string]interface{}{
@@ -1506,7 +1843,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ID      string `json:"id"`
 			Name    string `json:"name"`
 			OwnedBy string `json:"owned_by"`
-		}{ID: getUpstreamModelID(MODEL_NAME), Name: MODEL_NAME, OwnedBy: "openai"},
+		}{ID: route.UpstreamModel, Name: req.Model, OwnedBy: platform.ID},
 		ToolServers: []string{},
 		Variables: map[string]string{
 			"{{USER_NAME}}":        "User",
@@ -1515,22 +1852,22 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// 选择本次对话使用的token：优先使用配置的ZAI_TOKEN，否则获取匿名token
-	authToken := ZAI_TOKEN
-	if authToken == "" && ANON_TOKEN_ENABLED {
-		if t, err := getAnonymousToken(); err == nil {
+	// 选择本次对话使用的token：优先使用平台配置的token，否则获取匿名token
+	authToken := platform.Token
+	if authToken == "" && platform.AuthURL != "" && ANON_TOKEN_ENABLED {
+		if t, err := getAnonymousTokenForPlatform(platform); err == nil {
 			authToken = t
-			debugLog("使用匿名token: %s...", func() string {
+			debugLog("使用平台 %s 的匿名token: %s...", platform.Name, func() string {
 				if len(t) > TOKEN_DISPLAY_LENGTH {
 					return t[:TOKEN_DISPLAY_LENGTH]
 				}
 				return t
 			}())
 		} else {
-			debugLog("匿名token获取失败: %v", err)
+			debugLog("平台 %s 匿名token获取失败: %v", platform.Name, err)
 		}
 	} else if authToken != "" {
-		debugLog("使用配置的ZAI_TOKEN: %s...", func() string {
+		debugLog("使用平台 %s 配置的token: %s...", platform.Name, func() string {
 			if len(authToken) > TOKEN_DISPLAY_LENGTH {
 				return authToken[:TOKEN_DISPLAY_LENGTH]
 			}
@@ -1540,13 +1877,13 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 调用上游API
 	if req.Stream {
-		handleStreamResponseWithIDs(w, upstreamReq, chatID, authToken, startTime, path, clientIP, userAgent)
+		handleStreamResponseWithIDs(w, upstreamReq, chatID, authToken, startTime, path, clientIP, userAgent, platform)
 	} else {
-		handleNonStreamResponseWithIDs(w, upstreamReq, chatID, authToken, startTime, path, clientIP, userAgent)
+		handleNonStreamResponseWithIDs(w, upstreamReq, chatID, authToken, startTime, path, clientIP, userAgent, platform)
 	}
 }
 
-func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, authToken string) (*http.Response, error) {
+func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, authToken string, platform PlatformConfig) (*http.Response, error) {
 	reqBody, err := json.Marshal(upstreamReq)
 	if err != nil {
 		debugLog("上游请求序列化失败: %v", err)
@@ -1554,17 +1891,17 @@ func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, 
 	}
 
 	// 构建带URL参数的完整URL
-	baseURL := UPSTREAM_URL
+	baseURL := platform.UpstreamURL
 	timestamp := fmt.Sprintf("%d", time.Now().UnixMilli())
-	
+
 	// 生成UUID (简化版，使用crypto/rand会更好)
-	requestID := fmt.Sprintf("%x-%x-%x-%x-%x", 
-		time.Now().UnixNano(), time.Now().Unix(), 
+	requestID := fmt.Sprintf("%x-%x-%x-%x-%x",
+		time.Now().UnixNano(), time.Now().Unix(),
 		time.Now().Nanosecond(), time.Now().Second(), time.Now().Minute())
 	userID := fmt.Sprintf("%x-%x-%x-%x-%x",
 		time.Now().Unix(), time.Now().Nanosecond(),
 		time.Now().Second(), time.Now().Minute(), time.Now().Hour())
-	
+
 	// 构建URL参数 - 添加所有必要的指纹参数
 	fullURL := fmt.Sprintf("%s?timestamp=%s&requestId=%s&user_id=%s&version=0.0.1&platform=web&token=%s"+
 		"&user_agent=%s&language=zh-CN&languages=zh-CN,zh&timezone=Asia/Shanghai"+
@@ -1579,7 +1916,7 @@ func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, 
 		"&browser_name=Chrome&os_name=Mac+OS&signature_timestamp=%s",
 		baseURL, timestamp, requestID, userID, authToken,
 		url.QueryEscape(BROWSER_UA),
-		url.QueryEscape(ORIGIN_BASE+"/c/"+refererChatID), refererChatID,
+		url.QueryEscape(platform.OriginBase+"/c/"+refererChatID), refererChatID,
 		url.QueryEscape("Z.ai Chat - Free AI powered by GLM-4.6"),
 		url.QueryEscape(time.Now().Format("2006-01-02T15:04:05.000Z")),
 		url.QueryEscape(time.Now().UTC().Format(time.RFC1123)),
@@ -1598,7 +1935,7 @@ func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, 
 	// 生成 X-Signature - 基于请求体的 SHA-256 哈希（426错误修复）
 	hash := sha256.Sum256(reqBody)
 	signature := fmt.Sprintf("%x", hash)
-	
+
 	debugLog("生成签名: %s (基于请求体SHA256)", signature)
 
 	req.Header.Set("Content-Type", "application/json")
@@ -1611,13 +1948,13 @@ func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, 
 	req.Header.Set("sec-ch-ua-platform", SEC_CH_UA_PLAT)
 	req.Header.Set("X-FE-Version", X_FE_VERSION)
 	req.Header.Set("X-Signature", signature)
-	req.Header.Set("Origin", ORIGIN_BASE)
-	req.Header.Set("Referer", ORIGIN_BASE+"/c/"+refererChatID)
+	req.Header.Set("Origin", platform.OriginBase)
+	req.Header.Set("Referer", platform.OriginBase+"/c/"+refererChatID)
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	
+
 	// 添加Cookie
 	req.Header.Set("Cookie", fmt.Sprintf("token=%s", authToken))
 
@@ -1632,10 +1969,10 @@ func callUpstreamWithHeaders(upstreamReq UpstreamRequest, refererChatID string, 
 	return resp, nil
 }
 
-func handleStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamRequest, chatID string, authToken string, startTime time.Time, path string, clientIP, userAgent string) {
+func handleStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamRequest, chatID string, authToken string, startTime time.Time, path string, clientIP, userAgent string, platform PlatformConfig) {
 	debugLog("开始处理流式响应 (chat_id=%s)", chatID)
 
-	resp, err := callUpstreamWithHeaders(upstreamReq, chatID, authToken)
+	resp, err := callUpstreamWithHeaders(upstreamReq, chatID, authToken, platform)
 	if err != nil {
 		debugLog("调用上游失败: %v", err)
 		http.Error(w, "Failed to call upstream", http.StatusBadGateway)
@@ -1812,10 +2149,10 @@ func writeSSEChunk(w http.ResponseWriter, chunk OpenAIResponse) {
 	fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
-func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamRequest, chatID string, authToken string, startTime time.Time, path string, clientIP, userAgent string) {
+func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamRequest, chatID string, authToken string, startTime time.Time, path string, clientIP, userAgent string, platform PlatformConfig) {
 	debugLog("开始处理非流式响应 (chat_id=%s)", chatID)
 
-	resp, err := callUpstreamWithHeaders(upstreamReq, chatID, authToken)
+	resp, err := callUpstreamWithHeaders(upstreamReq, chatID, authToken, platform)
 	if err != nil {
 		debugLog("调用上游失败: %v", err)
 		http.Error(w, "Failed to call upstream", http.StatusBadGateway)
@@ -1851,9 +2188,9 @@ func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamR
 	for scanner.Scan() {
 		line := scanner.Text()
 		lineCount++
-		
+
 		debugLog("收到原始行[%d]: %s", lineCount, line)
-		
+
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -1871,8 +2208,8 @@ func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamR
 			continue
 		}
 
-		debugLog("解析成功 - type:%s phase:%s content_len:%d done:%v", 
-			upstreamData.Type, upstreamData.Data.Phase, 
+		debugLog("解析成功 - type:%s phase:%s content_len:%d done:%v",
+			upstreamData.Type, upstreamData.Data.Phase,
 			len(upstreamData.Data.DeltaContent), upstreamData.Data.Done)
 
 		if upstreamData.Data.DeltaContent != "" {
@@ -1891,7 +2228,7 @@ func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamR
 			break
 		}
 	}
-	
+
 	debugLog("扫描器共处理%d行", lineCount)
 
 	finalContent := fullContent.String()
@@ -1923,6 +2260,135 @@ func handleNonStreamResponseWithIDs(w http.ResponseWriter, upstreamReq UpstreamR
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 	debugLog("非流式响应发送完成")
+
+	// 记录成功请求统计
+	duration := time.Since(startTime)
+	recordRequestStats(startTime, path, http.StatusOK)
+	addLiveRequest("POST", path, http.StatusOK, duration, "", userAgent)
+}
+
+// 处理 zread.ai 的聊天完成请求
+func handleZreadChatCompletion(w http.ResponseWriter, r *http.Request, req OpenAIRequest, startTime time.Time, path, clientIP, userAgent string) {
+	debugLog("开始处理 zread.ai 聊天完成请求")
+
+	// 获取 zread.ai 平台配置
+	zreadPlatform, exists := Platforms["zread"]
+	if !exists {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":{"message":"zread.ai平台配置不存在","type":"internal_error"}}`))
+		return
+	}
+
+	// 创建 zread.ai 适配器
+	adapter := adapters.NewZreadAdapter(zreadPlatform.UpstreamURL, zreadPlatform.Token)
+
+	// 转换消息格式
+	messages := make([]map[string]string, len(req.Messages))
+	for i, msg := range req.Messages {
+		messages[i] = map[string]string{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+	}
+
+	// 设置响应头
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	if req.Stream {
+		// 流式响应处理
+		w.Header().Set("Content-Type", "text/event-stream")
+
+		body, err := adapter.ChatCompletion(req.Model, messages, true)
+		if err != nil {
+			debugLog("zread.ai 流式请求失败: %v", err)
+			http.Error(w, fmt.Sprintf("zread.ai request failed: %v", err), http.StatusInternalServerError)
+			duration := time.Since(startTime)
+			recordRequestStats(startTime, path, http.StatusInternalServerError)
+			addLiveRequest("POST", path, http.StatusInternalServerError, duration, "", userAgent)
+			return
+		}
+		defer body.Close()
+
+		// 设置 SSE 刷新器
+		flusher, _ := w.(http.Flusher)
+
+		// 读取并转发 SSE 流
+		scanner := bufio.NewScanner(body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				// 直接转发 zread.ai 的 SSE 数据
+				fmt.Fprintf(w, "%s\n", line)
+				flusher.Flush()
+			} else if line == "" {
+				fmt.Fprintf(w, "\n")
+				flusher.Flush()
+			}
+		}
+
+		// 发送结束标记
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+
+	} else {
+		// 非流式响应处理
+		body, err := adapter.ChatCompletion(req.Model, messages, false)
+		if err != nil {
+			debugLog("zread.ai 非流式请求失败: %v", err)
+			http.Error(w, fmt.Sprintf("zread.ai request failed: %v", err), http.StatusInternalServerError)
+			duration := time.Since(startTime)
+			recordRequestStats(startTime, path, http.StatusInternalServerError)
+			addLiveRequest("POST", path, http.StatusInternalServerError, duration, "", userAgent)
+			return
+		}
+		defer body.Close()
+
+		// 读取完整响应
+		responseBody, err := io.ReadAll(body)
+		if err != nil {
+			debugLog("读取 zread.ai 响应失败: %v", err)
+			http.Error(w, "Failed to read response", http.StatusInternalServerError)
+			duration := time.Since(startTime)
+			recordRequestStats(startTime, path, http.StatusInternalServerError)
+			addLiveRequest("POST", path, http.StatusInternalServerError, duration, "", userAgent)
+			return
+		}
+
+		debugLog("zread.ai 响应: %s", string(responseBody))
+
+		// 这里需要将 zread.ai 的响应格式转换为 OpenAI 格式
+		// 目前先返回原始响应，后续需要完善转换逻辑
+		w.Header().Set("Content-Type", "application/json")
+
+		// 简单的 OpenAI 格式响应（占位符）
+		openaiResp := OpenAIResponse{
+			ID:      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   req.Model,
+			Choices: []Choice{
+				{
+					Index: 0,
+					Message: Message{
+						Role:    "assistant",
+						Content: string(responseBody), // 临时直接返回原始内容
+					},
+					FinishReason: "stop",
+				},
+			},
+			Usage: Usage{
+				PromptTokens:     0,
+				CompletionTokens: 0,
+				TotalTokens:      0,
+			},
+		}
+
+		json.NewEncoder(w).Encode(openaiResp)
+	}
+
+	debugLog("zread.ai 请求处理完成")
 
 	// 记录成功请求统计
 	duration := time.Since(startTime)
