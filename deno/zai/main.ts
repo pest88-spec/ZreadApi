@@ -1,22 +1,32 @@
-// Deno OpenAI-Compatible API Proxy for Z.ai GLM-4.5
+import { PlatformConfig, resolveUpstreamModel, RuntimeConfig } from "./config.ts";
 
-// Make this file a module to support top-level await
-export {};
+const PROVIDER_BRAND = PlatformConfig.brand;
+const PROVIDER_HOME_URL = PlatformConfig.homeUrl;
+const PROVIDER_HOST = PlatformConfig.host;
+const ORIGIN_BASE = PlatformConfig.originBase;
+const REFERER_PREFIX = PlatformConfig.refererPrefix;
+const UPSTREAM_URL = PlatformConfig.upstreamUrl;
+const MODELS_URL = PlatformConfig.modelsUrl;
+const AUTH_URL = PlatformConfig.authUrl;
+const OWNED_BY = PlatformConfig.ownedBy;
+const X_FE_VERSION = RuntimeConfig.xFeVersion;
+const DEFAULT_KEY = RuntimeConfig.defaultKey;
+const ZAI_TOKEN = RuntimeConfig.upstreamToken;
+const KV_URL = RuntimeConfig.kvUrl;
+const MODEL_NAME = RuntimeConfig.modelName;
+const PORT = RuntimeConfig.port;
+const DEBUG_MODE = RuntimeConfig.debugMode;
+const DEFAULT_STREAM = RuntimeConfig.defaultStream;
+const DASHBOARD_ENABLED = RuntimeConfig.dashboardEnabled;
+const ENABLE_THINKING = RuntimeConfig.enableThinking;
+function normalizeOrigin(origin: string): string {
+  return origin.endsWith("/") ? origin.slice(0, -1) : origin;
+}
 
-// Config variables from environment
-const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") || "https://chat.z.ai/api/chat/completions";
-const DEFAULT_KEY = Deno.env.get("DEFAULT_KEY") || "sk-your-key";
-const ZAI_TOKEN = Deno.env.get("ZAI_TOKEN") || "";
-const KV_URL = Deno.env.get("KV_URL") || "";  // Remote KV database URL
-const MODEL_NAME = Deno.env.get("MODEL_NAME") || "GLM-4.5";
-const PORT = parseInt(Deno.env.get("PORT") || "9090");
-const DEBUG_MODE = Deno.env.get("DEBUG_MODE") === "true" || true;
-const DEFAULT_STREAM = Deno.env.get("DEFAULT_STREAM") !== "false";
-const DASHBOARD_ENABLED = Deno.env.get("DASHBOARD_ENABLED") !== "false";
-const ENABLE_THINKING = Deno.env.get("ENABLE_THINKING") === "true";
-
-// Browser headers for upstream requests (2025-09-30 更新：修复426错误)
-const X_FE_VERSION = "prod-fe-1.0.94"; // 更新：1.0.70 → 1.0.94
+function buildReferer(chatID: string): string {
+  const prefix = REFERER_PREFIX.endsWith("/") ? REFERER_PREFIX : `${REFERER_PREFIX}/`;
+  return `${normalizeOrigin(ORIGIN_BASE)}${prefix}${chatID}`;
+}
 
 // Browser fingerprint generator
 function generateBrowserHeaders(chatID: string, authToken: string): Record<string, string> {
@@ -31,6 +41,7 @@ function generateBrowserHeaders(chatID: string, authToken: string): Record<strin
   const platforms = ['"Windows"', '"macOS"', '"Linux"'];
   const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)];
   const randomPlatform = platforms[Math.floor(Math.random() * platforms.length)];
+  const origin = normalizeOrigin(ORIGIN_BASE);
 
   return {
     "Content-Type": "application/json",
@@ -39,24 +50,25 @@ function generateBrowserHeaders(chatID: string, authToken: string): Record<strin
     "Authorization": `Bearer ${authToken}`,
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
     "Accept-Encoding": "gzip, deflate, br, zstd",
-    "sec-ch-ua": `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="24", "Google Chrome";v="${chromeVersion}"`, // 更新：Chrome 140 格式
+    "sec-ch-ua":
+      `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="24", "Google Chrome";v="${chromeVersion}"`, // 更新：Chrome 140 格式
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": randomPlatform,
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
     "X-FE-Version": X_FE_VERSION,
-    "Origin": ORIGIN_BASE,
-    "Referer": `${ORIGIN_BASE}/c/${chatID}`,
+    "Origin": origin,
+    "Referer": buildReferer(chatID),
     "Priority": "u=1, i",
   };
 }
 
-const ORIGIN_BASE = "https://chat.z.ai";
-
 // Token strategy configuration
 // Parse ZAI_TOKEN to support multiple tokens separated by |
-const ZAI_TOKEN_ARRAY = ZAI_TOKEN ? ZAI_TOKEN.split("|").map(t => t.trim()).filter(t => t.length > 0) : [];
+const ZAI_TOKEN_ARRAY = ZAI_TOKEN
+  ? ZAI_TOKEN.split("|").map((t) => t.trim()).filter((t) => t.length > 0)
+  : [];
 const STATIC_TOKEN_POOL_ENABLED = ZAI_TOKEN_ARRAY.length > 0;
 const KV_TOKEN_POOL_ENABLED = !!KV_URL;
 
@@ -64,10 +76,11 @@ const KV_TOKEN_POOL_ENABLED = !!KV_URL;
 // 1. X-ZAI-Token header (if provided)
 // 2. Static Token Pool (ZAI_TOKEN environment variable)
 // 3. KV Token Pool (KV_URL database)
-// 4. Anonymous Token (auto-fetch from Z.ai)
+// 4. Anonymous Token (auto-fetch from upstream provider)
 
 // Thinking tags mode
-const THINK_TAGS_MODE = "strip"; // strip | think | raw
+const THINK_TAGS_MODE =
+  (Deno.env.get("THINK_TAGS_MODE") as "strip" | "think" | "raw" | undefined) ?? "strip";
 
 // Request statistics
 interface RequestStats {
@@ -133,6 +146,16 @@ interface LiveRequest {
   model?: string; // model name if applicable
 }
 
+interface StoredAccount {
+  email: string;
+  password: string;
+  token: string;
+}
+
+interface UpstreamModelsResponse {
+  data?: Array<{ id?: string; name?: string }>;
+}
+
 // Global stats
 const stats: RequestStats = {
   totalRequests: 0,
@@ -182,7 +205,11 @@ function getTokenFromStaticPool(): string | null {
 
   // Randomly select a token from the array
   const randomToken = ZAI_TOKEN_ARRAY[Math.floor(Math.random() * ZAI_TOKEN_ARRAY.length)];
-  debugLog(`Selected token from static pool (${ZAI_TOKEN_ARRAY.length} tokens available): ${randomToken.substring(0, 10)}...`);
+  debugLog(
+    `Selected token from static pool (${ZAI_TOKEN_ARRAY.length} tokens available): ${
+      randomToken.substring(0, 10)
+    }...`,
+  );
   return randomToken;
 }
 
@@ -195,12 +222,12 @@ async function getTokenFromKVPool(): Promise<string | null> {
 
   try {
     // Fetch all accounts from KV
-    const accounts: Array<{ email: string; password: string; token: string }> = [];
-    const entries = kvTokenPool.list({ prefix: ["zai_accounts"] });
+    const accounts: StoredAccount[] = [];
+    const entries = kvTokenPool.list<StoredAccount>({ prefix: ["zai_accounts"] });
 
     for await (const entry of entries) {
-      const data = entry.value as any;
-      if (data && data.token) {
+      const data = entry.value;
+      if (data?.token) {
         accounts.push({ email: data.email, password: data.password, token: data.token });
       }
     }
@@ -212,7 +239,9 @@ async function getTokenFromKVPool(): Promise<string | null> {
 
     // Randomly select an account
     const randomAccount = accounts[Math.floor(Math.random() * accounts.length)];
-    debugLog(`Selected token from KV pool: ${randomAccount.email} (${accounts.length} accounts available)`);
+    debugLog(
+      `Selected token from KV pool: ${randomAccount.email} (${accounts.length} accounts available)`,
+    );
     return randomAccount.token;
   } catch (error) {
     console.error("Failed to get token from KV pool:", error);
@@ -236,13 +265,17 @@ async function initDB() {
 // Get current hour key (format: YYYY-MM-DD-HH)
 function getHourKey(): string {
   const now = new Date();
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}-${String(now.getUTCHours()).padStart(2, "0")}`;
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${
+    String(now.getUTCDate()).padStart(2, "0")
+  }-${String(now.getUTCHours()).padStart(2, "0")}`;
 }
 
 // Get current date key (format: YYYY-MM-DD)
 function getDateKey(): string {
   const now = new Date();
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${
+    String(now.getUTCDate()).padStart(2, "0")
+  }`;
 }
 
 // Save hourly stats to KV
@@ -397,7 +430,7 @@ async function getHourlyStats(hours = 24): Promise<HourlyStats[]> {
   const prefix = ["stats", "hourly"];
 
   try {
-    const entries = kv.list<HourlyStats>({ prefix, reverse: true, limit: hours });
+    const entries = kv.list<HourlyStats>({ prefix }, { reverse: true, limit: hours });
     for await (const entry of entries) {
       result.push(entry.value);
     }
@@ -416,7 +449,7 @@ async function getDailyStats(days = 30): Promise<DailyStats[]> {
   const prefix = ["stats", "daily"];
 
   try {
-    const entries = kv.list<DailyStats>({ prefix, reverse: true, limit: days });
+    const entries = kv.list<DailyStats>({ prefix }, { reverse: true, limit: days });
     for await (const entry of entries) {
       result.push(entry.value);
     }
@@ -434,7 +467,11 @@ async function cleanupOldData() {
   try {
     // Delete hourly data older than 7 days
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const cutoffHour = `${sevenDaysAgo.getUTCFullYear()}-${String(sevenDaysAgo.getUTCMonth() + 1).padStart(2, "0")}-${String(sevenDaysAgo.getUTCDate()).padStart(2, "0")}-${String(sevenDaysAgo.getUTCHours()).padStart(2, "0")}`;
+    const cutoffHour = `${sevenDaysAgo.getUTCFullYear()}-${
+      String(sevenDaysAgo.getUTCMonth() + 1).padStart(2, "0")
+    }-${String(sevenDaysAgo.getUTCDate()).padStart(2, "0")}-${
+      String(sevenDaysAgo.getUTCHours()).padStart(2, "0")
+    }`;
 
     const hourlyPrefix = ["stats", "hourly"];
     const hourlyEntries = kv.list({ prefix: hourlyPrefix });
@@ -449,7 +486,9 @@ async function cleanupOldData() {
 
     // Delete daily data older than 30 days
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const cutoffDate = `${thirtyDaysAgo.getUTCFullYear()}-${String(thirtyDaysAgo.getUTCMonth() + 1).padStart(2, "0")}-${String(thirtyDaysAgo.getUTCDate()).padStart(2, "0")}`;
+    const cutoffDate = `${thirtyDaysAgo.getUTCFullYear()}-${
+      String(thirtyDaysAgo.getUTCMonth() + 1).padStart(2, "0")
+    }-${String(thirtyDaysAgo.getUTCDate()).padStart(2, "0")}`;
 
     const dailyPrefix = ["stats", "daily"];
     const dailyEntries = kv.list({ prefix: dailyPrefix });
@@ -562,7 +601,7 @@ function debugLog(...args: unknown[]) {
 }
 
 // Record request stats
-async function recordRequestStats(
+function recordRequestStats(
   startTime: number,
   path: string,
   status: number,
@@ -618,9 +657,9 @@ async function recordRequestStats(
   }
 
   // Save to KV database (async, don't await to avoid blocking)
-  saveHourlyStats(duration, status, tokens, model, isStreaming, messageCount, clientIP).catch((err) =>
-    debugLog("Error saving hourly stats:", err)
-  );
+  saveHourlyStats(duration, status, tokens, model, isStreaming, messageCount, clientIP).catch((
+    err,
+  ) => debugLog("Error saving hourly stats:", err));
 }
 
 // Add live request
@@ -675,10 +714,13 @@ async function getAnonymousToken(): Promise<string> {
   try {
     // 使用 Chrome 140 的 User-Agent
     const chromeVersion = 140;
-    const userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`;
-    const secChUa = `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="24", "Google Chrome";v="${chromeVersion}"`;
+    const userAgent =
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`;
+    const secChUa =
+      `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="24", "Google Chrome";v="${chromeVersion}"`;
+    const origin = normalizeOrigin(ORIGIN_BASE);
 
-    const response = await fetch(`${ORIGIN_BASE}/api/v1/auths/`, {
+    const response = await fetch(AUTH_URL, {
       method: "GET",
       headers: {
         "User-Agent": userAgent,
@@ -688,8 +730,8 @@ async function getAnonymousToken(): Promise<string> {
         "sec-ch-ua": secChUa,
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
-        "Origin": ORIGIN_BASE,
-        "Referer": `${ORIGIN_BASE}/`,
+        "Origin": origin,
+        "Referer": `${origin}/`,
       },
     });
 
@@ -754,7 +796,7 @@ async function callUpstream(
   const data = encoder.encode(reqBody);
   const hashBuffer = await crypto.subtle.digest("SHA-256", data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const signature = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+  const signature = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 
   debugLog("Generated X-Signature:", signature);
 
@@ -808,14 +850,15 @@ async function handleStreamResponse(
     // Return OpenAI-compatible error response
     const errorResponse = {
       error: {
-        message: `Upstream server returned error: ${upstreamResp.status} ${upstreamResp.statusText}`,
+        message:
+          `Upstream server returned error: ${upstreamResp.status} ${upstreamResp.statusText}`,
         type: "upstream_error",
         code: "upstream_error",
-      }
+      },
     };
     return new Response(JSON.stringify(errorResponse), {
       status: 502,
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
     });
   }
 
@@ -865,7 +908,7 @@ async function handleStreamResponse(
             id: `chatcmpl-${Date.now()}`,
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
-            model: MODEL_NAME,
+            model: model,
             choices: [{
               index: 0,
               delta: { role: "assistant" },
@@ -902,7 +945,7 @@ async function handleStreamResponse(
                   id: `chatcmpl-${Date.now()}`,
                   object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
-                  model: MODEL_NAME,
+                  model: model,
                   choices: [{
                     index: 0,
                     delta: {},
@@ -931,7 +974,7 @@ async function handleStreamResponse(
                     id: `chatcmpl-${Date.now()}`,
                     object: "chat.completion.chunk",
                     created: Math.floor(Date.now() / 1000),
-                    model: MODEL_NAME,
+                    model: model,
                     choices: [{
                       index: 0,
                       delta: { content: out },
@@ -948,7 +991,7 @@ async function handleStreamResponse(
                   id: `chatcmpl-${Date.now()}`,
                   object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
-                  model: MODEL_NAME,
+                  model: model,
                   choices: [{
                     index: 0,
                     delta: {},
@@ -1026,14 +1069,15 @@ async function handleNonStreamResponse(
     // Return OpenAI-compatible error response
     const errorResponse = {
       error: {
-        message: `Upstream server returned error: ${upstreamResp.status} ${upstreamResp.statusText}`,
+        message:
+          `Upstream server returned error: ${upstreamResp.status} ${upstreamResp.statusText}`,
         type: "upstream_error",
         code: "upstream_error",
-      }
+      },
     };
     return new Response(JSON.stringify(errorResponse), {
       status: 502,
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
     });
   }
 
@@ -1044,11 +1088,11 @@ async function handleNonStreamResponse(
         message: "No response body from upstream server",
         type: "upstream_error",
         code: "no_response_body",
-      }
+      },
     };
     return new Response(JSON.stringify(errorResponse), {
       status: 502,
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
     });
   }
 
@@ -1076,7 +1120,7 @@ async function handleNonStreamResponse(
         if (upstreamData.data.delta_content) {
           let out = upstreamData.data.delta_content;
           if (upstreamData.data.phase === "thinking") {
-            out = transformThinking(out, enableThinking);
+            out = transformThinking(out);
           }
           if (out) {
             fullContent += out;
@@ -1096,7 +1140,7 @@ async function handleNonStreamResponse(
     id: `chatcmpl-${Date.now()}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
-    model: MODEL_NAME,
+    model: model,
     choices: [{
       index: 0,
       message: {
@@ -1147,7 +1191,16 @@ async function handleModels(req: Request): Promise<Response> {
       if (!token) {
         debugLog("Failed to get anonymous token for models request");
         const duration = Date.now() - startTime;
-        recordRequestStats(startTime, "/v1/models", 500, 0, undefined, undefined, undefined, clientIP);
+        recordRequestStats(
+          startTime,
+          "/v1/models",
+          500,
+          0,
+          undefined,
+          undefined,
+          undefined,
+          clientIP,
+        );
         addLiveRequest("GET", "/v1/models", 500, duration, clientIP, userAgent);
         return new Response(JSON.stringify({ error: "Failed to authenticate" }), {
           status: 500,
@@ -1158,10 +1211,13 @@ async function handleModels(req: Request): Promise<Response> {
 
     // Request models from upstream
     const chromeVersion = 140;
-    const modelsUserAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`;
-    const secChUa = `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="24", "Google Chrome";v="${chromeVersion}"`;
+    const modelsUserAgent =
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`;
+    const secChUa =
+      `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="24", "Google Chrome";v="${chromeVersion}"`;
 
-    const upstreamResponse = await fetch("https://chat.z.ai/api/models", {
+    const origin = normalizeOrigin(ORIGIN_BASE);
+    const upstreamResponse = await fetch(MODELS_URL, {
       method: "GET",
       headers: {
         "Accept": "application/json",
@@ -1169,7 +1225,8 @@ async function handleModels(req: Request): Promise<Response> {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${token}`,
         "User-Agent": modelsUserAgent,
-        "Referer": "https://chat.z.ai/",
+        "Referer": `${origin}/`,
+        "Origin": origin,
         "X-FE-Version": X_FE_VERSION,
         "sec-ch-ua": secChUa,
         "sec-ch-ua-mobile": "?0",
@@ -1185,14 +1242,15 @@ async function handleModels(req: Request): Promise<Response> {
       throw new Error(`Upstream returned ${upstreamResponse.status}`);
     }
 
-    const upstreamData = await upstreamResponse.json();
+    const upstreamData = await upstreamResponse.json() as UpstreamModelsResponse;
+    const upstreamModels = upstreamData.data ?? [];
 
     // Transform to OpenAI format
-    const models = upstreamData.data.map((model: any) => ({
+    const models = upstreamModels.map((model) => ({
       id: model.name || model.id,
       object: "model",
       created: Math.floor(Date.now() / 1000),
-      owned_by: "z.ai",
+      owned_by: OWNED_BY,
     }));
 
     const response = {
@@ -1212,15 +1270,30 @@ async function handleModels(req: Request): Promise<Response> {
   } catch (error) {
     debugLog(`Error fetching models: ${error}`);
 
-    // Fallback to default model
+    // Fallback to default models
+    const fallbackModels = new Map<string, string>();
+    fallbackModels.set(MODEL_NAME, PlatformConfig.defaultModelId || MODEL_NAME);
+    const modelMap = PlatformConfig.modelIdMap as Record<string, string>;
+    const aliases = PlatformConfig.modelAliases as string[] | undefined;
+    if (aliases) {
+      for (const alias of aliases) {
+        const trimmed = alias.trim();
+        if (!trimmed) continue;
+        fallbackModels.set(trimmed, modelMap[trimmed.toLowerCase()] || trimmed);
+      }
+    }
+    if (!fallbackModels.size) {
+      fallbackModels.set(MODEL_NAME, PlatformConfig.defaultModelId || MODEL_NAME);
+    }
+
     const response = {
       object: "list",
-      data: [{
-        id: MODEL_NAME,
+      data: Array.from(fallbackModels.keys()).map((id) => ({
+        id,
         object: "model",
         created: Math.floor(Date.now() / 1000),
-        owned_by: "z.ai",
-      }],
+        owned_by: OWNED_BY,
+      })),
     };
 
     const headers = new Headers({ "Content-Type": "application/json" });
@@ -1305,12 +1378,17 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     : ENABLE_THINKING;
   debugLog("Enable thinking:", enableThinking);
 
+  // Resolve target model
+  const { requestedModel, upstreamModelId } = resolveUpstreamModel(body.model);
+  const clientModel = requestedModel;
+  debugLog("Resolved model -> client: " + clientModel + ", upstream: " + upstreamModelId);
+
   // Build upstream request
   const upstreamReq: UpstreamRequest = {
     stream: true,
     chat_id: chatID,
     id: msgID,
-    model: "0727-360B-API",
+    model: upstreamModelId,
     messages: body.messages,
     params: {},
     features: {
@@ -1322,9 +1400,9 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     },
     mcp_servers: [],
     model_item: {
-      id: "0727-360B-API",
-      name: "GLM-4.5",
-      owned_by: "openai",
+      id: upstreamModelId,
+      name: clientModel,
+      owned_by: OWNED_BY,
     },
     tool_servers: [],
     variables: {
@@ -1333,6 +1411,8 @@ async function handleChatCompletions(req: Request): Promise<Response> {
       "{{CURRENT_DATETIME}}": new Date().toISOString().replace("T", " ").substring(0, 19),
     },
   };
+
+  body.model = clientModel;
 
   // Get auth token with fallback cascade
   // Priority: X-ZAI-Token header > Static Token Pool > KV Token Pool > Anonymous Token
@@ -1378,18 +1458,22 @@ async function handleChatCompletions(req: Request): Promise<Response> {
 
   // If still no token after all attempts, return server configuration error
   if (!authToken) {
-    const errorMessage = "Server configuration error: No valid Z.ai token available. Please configure ZAI_TOKEN or KV_URL environment variable.";
+    const errorMessage =
+      `Server configuration error: No valid ${PROVIDER_BRAND} token available. Please configure UPSTREAM_TOKEN, ZAI_TOKEN, or KV_URL environment variable.`;
     debugLog(errorMessage);
-    return new Response(JSON.stringify({
-      error: {
-        message: errorMessage,
-        type: "server_error",
-        code: "token_unavailable"
-      }
-    }), {
-      status: 503,
-      headers: { "Content-Type": "application/json" }
-    });
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: errorMessage,
+          type: "server_error",
+          code: "token_unavailable",
+        },
+      }),
+      {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   }
 
   // Call upstream
@@ -1402,7 +1486,7 @@ async function handleChatCompletions(req: Request): Promise<Response> {
       path,
       clientIP,
       userAgent,
-      body.model,
+      clientModel,
       body.messages.length,
     );
   } else {
@@ -1414,7 +1498,7 @@ async function handleChatCompletions(req: Request): Promise<Response> {
       path,
       clientIP,
       userAgent,
-      body.model,
+      clientModel,
       body.messages.length,
     );
   }
@@ -2002,7 +2086,7 @@ const playgroundHTML = `<!DOCTYPE html>
     <div class="container mx-auto px-4 py-8 max-w-7xl">
         <div class="text-center mb-8">
             <h1 class="text-4xl font-bold text-gray-900 mb-3">🎮 Playground</h1>
-            <p class="text-gray-600">在线测试 Z.ai GLM-4.5 API 请求和响应</p>
+            <p class="text-gray-600">在线测试 ${PROVIDER_BRAND} ${MODEL_NAME} API 请求和响应</p>
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -2026,7 +2110,7 @@ const playgroundHTML = `<!DOCTYPE html>
                     <input type="text" id="zaiToken" value=""
                            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent font-mono text-sm"
                            placeholder="留空则使用匿名 token">
-                    <p class="text-xs text-gray-500 mt-1">自定义 Z.ai 上游 token（高级选项）</p>
+                    <p class="text-xs text-gray-500 mt-1">自定义 ${PROVIDER_BRAND} 上游 token（高级选项）</p>
                 </div>
 
                 <!-- Model Selection -->
@@ -2064,7 +2148,9 @@ const playgroundHTML = `<!DOCTYPE html>
                 <!-- Enable Thinking -->
                 <div class="mb-4">
                     <label class="flex items-center">
-                        <input type="checkbox" id="enableThinking" ${ENABLE_THINKING ? "checked" : ""} class="mr-2">
+                        <input type="checkbox" id="enableThinking" ${
+  ENABLE_THINKING ? "checked" : ""
+} class="mr-2">
                         <span class="text-sm font-medium text-gray-700">启用思维链</span>
                     </label>
                     <p class="text-xs text-gray-500 mt-1">启用后将显示 AI 的思考过程</p>
@@ -2621,11 +2707,11 @@ const deployHTML = `<!DOCTYPE html>
                         <code class="bg-yellow-100 px-2 py-1 rounded mr-2 text-sm">ZAI_TOKEN</code>
                         <span class="text-yellow-600 text-sm">(可选)</span>
                     </h3>
-                    <p class="text-gray-700 mb-3">Z.ai 的访问令牌。如不设置，系统会自动获取匿名 token。</p>
+                    <p class="text-gray-700 mb-3">${PROVIDER_BRAND} 的访问令牌。如不设置，系统会自动获取匿名 token。</p>
                     <div class="bg-white rounded p-3 mb-2">
                         <p class="font-semibold text-gray-800 mb-2">获取方式：</p>
                         <ol class="list-decimal list-inside space-y-1 text-sm text-gray-600">
-                            <li>访问 <a href="https://chat.z.ai" target="_blank" class="text-purple-600 hover:underline">chat.z.ai</a> 并登录</li>
+                            <li>访问 <a href="${PROVIDER_HOME_URL}" target="_blank" class="text-purple-600 hover:underline">${PROVIDER_HOST}</a> 并登录</li>
                             <li>打开浏览器开发者工具（F12）</li>
                             <li>切换到 Network 标签</li>
                             <li>发送一条消息</li>
@@ -2764,7 +2850,7 @@ const homeHTML = `<!DOCTYPE html>
                 <h1 class="text-6xl font-bold text-white mb-4">
                     <span class="inline-block hover:scale-110 transition-transform">🦕</span> ZtoApi
                 </h1>
-                <p class="text-xl text-purple-100">OpenAI 兼容 API 代理 for Z.ai GLM-4.5</p>
+                <p class="text-xl text-purple-100">OpenAI 兼容 API 代理 for ${PROVIDER_BRAND} ${MODEL_NAME}</p>
             </div>
 
             <!-- Status Card -->
@@ -2879,7 +2965,7 @@ const apiDocsHTML = `<!DOCTYPE html>
 
         <div class="bg-white rounded-xl shadow-sm border p-8 mb-6">
             <h2 class="text-2xl font-bold text-gray-900 mb-4">概述</h2>
-            <p class="text-gray-700 mb-4">ZtoApi 是一个为 Z.ai GLM-4.5 模型提供 OpenAI 兼容 API 接口的代理服务器。</p>
+            <p class="text-gray-700 mb-4">ZtoApi 是一个为 ${PROVIDER_BRAND} ${MODEL_NAME} 模型提供 OpenAI 兼容 API 接口的代理服务器。</p>
             <div class="bg-purple-50 border border-purple-200 rounded-lg p-4">
                 <p class="text-sm text-gray-600 mb-2">基础 URL</p>
                 <code class="text-purple-700 font-mono text-lg">https://zto2api.deno.dev/v1</code>
@@ -3038,7 +3124,7 @@ print(response.choices[0].message.content)</pre>
 
         <div class="bg-white rounded-xl shadow-sm border p-8 mb-6">
             <h2 class="text-2xl font-bold text-gray-900 mb-4">🤖 KV Token Pool + zai_register 联动部署</h2>
-            <p class="text-gray-700 mb-4">通过 <code class="bg-gray-100 px-2 py-1 rounded">zai_register.ts</code> 批量注册 Z.ai 账号并存储到 Deno KV，然后让 <code class="bg-gray-100 px-2 py-1 rounded">main.ts</code> 从同一个 KV 读取 token 使用。</p>
+            <p class="text-gray-700 mb-4">通过 <code class="bg-gray-100 px-2 py-1 rounded">zai_register.ts</code> 批量注册 ${PROVIDER_BRAND} 账号并存储到 Deno KV，然后让 <code class="bg-gray-100 px-2 py-1 rounded">main.ts</code> 从同一个 KV 读取 token 使用。</p>
 
             <div class="mb-6">
                 <h3 class="font-semibold text-gray-900 mb-3">📋 部署步骤</h3>
@@ -3250,16 +3336,19 @@ async function handler(req: Request): Promise<Response> {
 
       const paginatedRequests = liveRequests.slice().reverse().slice(start, end);
 
-      return new Response(JSON.stringify({
-        requests: paginatedRequests,
-        total: liveRequests.length,
-        page,
-        pageSize,
-        totalPages: Math.ceil(liveRequests.length / pageSize),
-      }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({
+          requests: paginatedRequests,
+          total: liveRequests.length,
+          page,
+          pageSize,
+          totalPages: Math.ceil(liveRequests.length / pageSize),
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
 
     if (path === "/dashboard/hourly" && req.method === "GET") {
