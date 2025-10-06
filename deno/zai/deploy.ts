@@ -350,7 +350,31 @@ Deno.serve(async (req) => {
         throw new Error(`Upstream API error: ${response.status} - ${errorText}`);
       }
 
-      const data = await response.json();
+      // 处理SSE流响应
+      const responseText = await response.text();
+      let data: any = {};
+
+      if (DEBUG_MODE) {
+        console.log("Upstream response text:", responseText);
+      }
+
+      // 解析SSE流，提取data内容
+      const lines = responseText.split('\n');
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const jsonStr = line.slice(6);
+            if (jsonStr && jsonStr !== '[DONE]') {
+              data = JSON.parse(jsonStr);
+              break;
+            }
+          } catch (e) {
+            if (DEBUG_MODE) {
+              console.log("Failed to parse SSE data:", line);
+            }
+          }
+        }
+      }
 
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
