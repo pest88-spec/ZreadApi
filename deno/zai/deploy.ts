@@ -275,15 +275,21 @@ Deno.serve(async (req) => {
         }
 
         const sessionData = await sessionResponse.json();
-        const chatId = sessionData.id || sessionData.chat_id;
 
         if (DEBUG_MODE) {
-          console.log("Session created successfully");
-          console.log("Chat ID:", chatId);
+          console.log("Session response data:", JSON.stringify(sessionData));
+        }
+
+        const chatId = sessionData.id || sessionData.chat_id || sessionData.talk_id ||
+                       sessionData.data?.id || sessionData.data?.chat_id || sessionData.data?.talk_id;
+
+        if (DEBUG_MODE) {
+          console.log("Extracted chat ID:", chatId);
         }
 
         if (!chatId) {
-          throw new Error("Failed to get chat session ID");
+          console.error("Session data keys:", Object.keys(sessionData));
+          throw new Error(`Failed to get chat session ID. Response: ${JSON.stringify(sessionData)}`);
         }
 
         // 第二步：发送消息到新会话
