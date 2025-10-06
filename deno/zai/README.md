@@ -1,326 +1,262 @@
-# OpenAI兼容API代理 for Z.ai GLM-4.5 (Deno版本)
+# OpenAI 兼容 API 代理（Deno 版）
 
-这是一个为Z.ai GLM-4.5模型提供OpenAI兼容API接口的代理服务器（Deno版本）。它允许你使用标准的OpenAI API格式与Z.ai的GLM-4.5模型进行交互，支持流式和非流式响应。
+这是一套运行于 Deno 的 OpenAI 兼容代理，默认对接 Z.ai 的 GLM 系列模型，同时通过环境变量即可无缝切换到 zread.ai（GLM‑4.5 / Claude 4 Sonnet 等）。项目能够将 OpenAI 风格的 `chat/completions` 请求转发到上游服务，自动处理身份认证、SSE 流式输出、思维链内容清洗以及仪表盘监控。
 
-> **注意**: 本项目基于 [OpenAI-Compatible-API-Proxy-for-Z](https://github.com/kbykb/OpenAI-Compatible-API-Proxy-for-Z) 二次开发，并改造为 Deno 版本
+> 如果你只需要快速上手：仔细阅读“4. 配置环境”和“5. 启动服务”两个章节即可。
 
-## ✨ 主要功能
+---
 
-- 🔄 **OpenAI API兼容**: 完全兼容OpenAI的API格式，无需修改客户端代码
-- 🌊 **流式响应支持**: 支持实时流式输出，提供更好的用户体验
-- 🔐 **身份验证**: 支持API密钥验证，确保服务安全
-- 🛠️ **灵活配置**: 通过环境变量进行灵活配置
-- 🐳 **Docker支持**: 提供Docker镜像，便于部署
-- 🌍 **CORS支持**: 支持跨域请求，便于前端集成
-- 📝 **思考过程展示**: 智能处理并展示模型的思考过程
-- 📊 **实时监控仪表板**: 提供Web仪表板，实时显示API转发情况和统计信息
-- 🦕 **Deno运行时**: 使用现代化的Deno运行时，安全且高效
+## 1. 功能概览
 
-## 🚀 快速开始
+- 🔄 **OpenAI API 兼容**：`/v1/models`、`/v1/chat/completions` 等端口与官方格式一致。
+- 🌊 **流式 & 非流式**：使用 Server-Sent Events 在终端或浏览器实时展示回复。
+- 🔐 **多令牌策略**：支持显式 `UPSTREAM_TOKEN`、KV 池、多 Token 轮换以及匿名 Token。
+- 🧠 **思维链处理**：可配置 `THINK_TAGS_MODE`，对上游返回的 `<details>` / `<summary>` 内容做清洗或保留。
+- 📈 **内置仪表盘**：`/dashboard` 提供请求统计、趋势及最近调用列表。
+- ⚙️ **模型映射**：通过 `UPSTREAM_MODEL_ID_MAP` 自定义“公开模型名”与“上游真实模型 ID”的对应关系。
 
-### 环境要求
+---
 
-- Deno 1.40 或更高版本
-- Z.ai 的访问令牌（可选，不提供将自动获取匿名token）
+## 2. 环境要求
 
-### 安装 Deno
+| 组件                         | 说明                                                        | 验证方式                                |
+| ---------------------------- | ----------------------------------------------------------- | --------------------------------------- |
+| Deno ≥ 2.5                   | 代理运行环境，需启用 `--allow-net --allow-env --allow-read` | `deno --version`                        |
+| Git                          | 拉取/更新代码                                               | `git --version`                         |
+| curl 或 HTTPie（可选）       | 快速验证 API                                                | `curl --version`                        |
+| Z.ai / zread.ai 账号（可选） | 若需使用固定 Token，可从浏览器开发者工具复制                | 在浏览器登录并抓包 `Authorization` 头部 |
 
-**macOS/Linux:**
+> Windows 用户建议使用 PowerShell 7+；macOS / Linux 推荐使用 zsh 或 bash。
+
+安装 Deno：
+
 ```bash
-curl -fsSL https://deno.land/install.sh | sh
-```
+# macOS / Linuxcurl -fsSL https://deno.land/install.sh | sh
 
-**Windows:**
-```powershell
+# Windows (PowerShell)
 irm https://deno.land/install.ps1 | iex
 ```
 
-### 本地部署
+---
 
-1. **克隆仓库**
-   ```bash
-   git clone https://github.com/your-username/ZtoApi.git
-   cd ZtoApi
-   ```
-
-2. **配置环境变量**
-   ```bash
-   cp config.env .env.local
-   # 编辑 .env.local 文件，设置你的 ZAI_TOKEN（可选）
-   ```
-
-3. **启动服务**
-   ```bash
-   # 使用启动脚本（推荐）
-   ./start.sh          # macOS/Linux
-   start.bat           # Windows
-
-   # 或直接运行
-   deno task start
-
-   # 开发模式（自动重启）
-   deno task dev
-   ```
-
-4. **测试服务**
-    ```bash
-    curl http://localhost:9090/v1/models
-    ```
-
-5. **访问API文档**
-
-   启动服务后，可以通过浏览器访问以下地址查看API文档：
-    ```
-    http://localhost:9090/docs
-    ```
-
-6. **访问Dashboard**
-
-   启动服务后，可以通过浏览器访问以下地址查看实时监控仪表板：
-   ```
-   http://localhost:9090/dashboard
-   ```
-
-### Docker部署
-
-1. **构建镜像**
-   ```bash
-   docker build -f Dockerfile.deno -t zto-api-deno .
-   ```
-
-2. **运行容器**
-   ```bash
-   docker run -p 9090:9090 \
-     -e ZAI_TOKEN=your_z_ai_token \
-     -e DEFAULT_KEY=your_api_key \
-     zto-api-deno
-   ```
-
-## ⚙️ 环境变量配置
-
-### 🚀 快速开始
-
-#### 1. 使用启动脚本（推荐）
-
-**macOS/Linux:**
-```bash
-./start.sh
-```
-
-**Windows:**
-```cmd
-start.bat
-```
-
-#### 2. 手动设置环境变量
-
-**macOS/Linux:**
-```bash
-export ZAI_TOKEN="your_z_ai_token_here"
-export DEFAULT_KEY="sk-your-custom-key"
-export PORT="9090"
-deno task start
-```
-
-**Windows:**
-```cmd
-set ZAI_TOKEN=your_z_ai_token_here
-set DEFAULT_KEY=sk-your-custom-key
-set PORT=9090
-deno task start
-```
-
-#### 3. Docker运行
+## 3. 获取代码
 
 ```bash
-docker run -p 9090:9090 \
-  -e ZAI_TOKEN=your_z_ai_token_here \
-  -e DEFAULT_KEY=sk-your-custom-key \
-  -e PORT=9090 \
-  zto-api-deno
+# 克隆仓库
+git clone https://github.com/pest88-spec/ZreadApi.git
+cd ZreadApi/deno/zai
 ```
 
-### 📋 环境变量列表
+> 如需长期使用，建议 Fork 后再克隆到本地，便于维护自定义配置。
 
-#### 🔑 必需配置
+---
 
-无必需配置。所有配置都有合理的默认值。
+## 4. 配置环境（.env.local）
 
-#### ⚙️ 可选配置
-
-| 变量名 | 说明 | 默认值 | 示例 |
-|--------|------|--------|------|
-| `ZAI_TOKEN` | Z.ai 访问令牌 | 空（自动获取随机匿名token） | `eyJhbGciOiJFUzI1NiIs...` |
-| `DEFAULT_KEY` | 客户端API密钥 | `sk-your-key` | `sk-my-api-key` |
-| `MODEL_NAME` | 显示模型名称 | `GLM-4.5` | `GLM-4.5-Pro` |
-| `PORT` | 服务监听端口 | `9090` | `9000` |
-| `DEBUG_MODE` | 调试模式开关 | `true` | `false` |
-| `DEFAULT_STREAM` | 默认流式响应 | `true` | `false` |
-| `DASHBOARD_ENABLED` | Dashboard功能开关 | `true` | `false` |
-| `ENABLE_THINKING` | 思考功能开关 | `false` | `true` |
-
-#### 🔧 高级配置
-
-| 变量名 | 说明 | 默认值 | 示例 |
-|--------|------|--------|------|
-| `UPSTREAM_URL` | 上游API地址 | `https://chat.z.ai/api/chat/completions` | 自定义URL |
-
-### 📁 配置文件
-
-#### 支持的配置文件（按优先级排序）
-
-1. `.env.local` - 本地环境配置（推荐）
-2. `.env` - 环境配置
-3. `config.env` - 配置模板
-
-#### 配置文件示例
+项目提供 `deno/zai/.env.example` 作为模板，将其复制为 `.env.local`（建议放在仓库根目录）。`.env.local` 用于保存个人/环境敏感配置，不会被 Git 跟踪。
 
 ```bash
-# 复制配置文件
-cp config.env .env.local
+# macOS / Linux
+cp deno/zai/.env.example .env.local
 
-# 编辑配置文件
-nano .env.local
+# Windows (PowerShell)
+Copy-Item deno\zai\.env.example .env.local
 ```
 
-### 🔐 获取 Z.ai Token
+常用变量说明：
 
-#### 方法1：浏览器开发者工具
+| 变量                        | 作用                                   | 示例                                                        |
+| --------------------------- | -------------------------------------- | ----------------------------------------------------------- |
+| `PLATFORM_ID`               | 平台标识，建议 `zai` / `zread`         | `zread`                                                     |
+| `PROVIDER_HOME_URL`         | 浏览器访问域名                         | `https://zread.ai`                                          |
+| `REGISTER_SSO_REDIRECT`     | 登录完成后的跳转地址                   | `https://zread.ai/`                                         |
+| `PLATFORM_API_BASE`         | 实际发送请求的 API 域                  | `https://zread.ai`                                          |
+| `DEFAULT_KEY`               | 代理自身的 API Key（客户端调用时使用） | `sk-local-dev`                                              |
+| `UPSTREAM_TOKEN`            | 上游 Bearer Token（可选）              | `eyJhbGci...`                                               |
+| `UPSTREAM_MODEL_ID_DEFAULT` | 未显式映射时的上游模型 ID              | `0727-360B-API`                                             |
+| `UPSTREAM_MODEL_ID_MAP`     | JSON 字符串，公开模型与上游 ID 的映射  | `{"glm-4.5":"glm-4.5","claude-4-sonnet":"claude-4-sonnet"}` |
 
-1. 登录 [Z.ai](https://chat.z.ai)
-2. 打开浏览器开发者工具（F12）
-3. 切换到 Network 标签页
-4. 发送一条消息
-5. 在请求中找到 `Authorization` 头部的 Bearer token
+### 4.1 Z.ai 默认配置示例
 
-#### 方法2：匿名Token
+```env
+PLATFORM_ID=zai
+PROVIDER_HOME_URL=https://chat.z.ai
+REGISTER_SSO_REDIRECT=https://chat.z.ai/
+PLATFORM_API_BASE=https://chat.z.ai
+MODEL_NAME=GLM-4.6
+UPSTREAM_MODEL_ID_DEFAULT=0727-360B-API
+UPSTREAM_MODEL_ID_MAP='{"GLM-4.6":"0727-360B-API"}'
+DEFAULT_KEY=sk-your-key
+UPSTREAM_TOKEN=  # 可选：使用匿名 token 时保留为空
+```
 
-本项目支持自动获取匿名token，无需手动配置。当 `ZAI_TOKEN` 环境变量未设置时，系统会自动为每次对话获取不同的随机匿名token，避免共享记忆。
+### 4.2 zread.ai 配置示例
 
-## 📖 API使用示例
+```env
+PLATFORM_ID=zread
+PROVIDER_HOME_URL=https://zread.ai
+REGISTER_SSO_REDIRECT=https://zread.ai/
+PLATFORM_API_BASE=https://zread.ai
+MODEL_NAME=glm-4.5
+UPSTREAM_MODEL_ID_DEFAULT=glm-4.5
+UPSTREAM_MODEL_ID_MAP='{"glm-4.5":"glm-4.5","claude-4-sonnet":"claude-4-sonnet"}'
+DEFAULT_KEY=sk-your-key
+UPSTREAM_TOKEN=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...
+```
 
-### Python示例
+> `.env.local` 存放在本地即可，**必须**在运行命令时通过 `--env-file=.env.local` 显式加载，见下一节。
+
+---
+
+## 5. 启动与验证
+
+### 5.1 使用 Deno 任务
+
+```bash
+# macOS / Linux
+deno task start --env-file=.env.local
+
+# Windows (PowerShell)
+deno task start --env-file=.env.local
+```
+
+开发模式（文件变动自动重启）：
+
+```bash
+deno task dev --env-file=.env.local
+```
+
+> 若不想创建 `.env.local`，也可以直接在 shell 中 `export` / `set` 环境变量再执行任务。
+
+### 5.2 手动运行（可选）
+
+```bash
+deno run --allow-net --allow-env --allow-read --env-file=.env.local main.ts
+```
+
+### 5.3 验证接口
+
+1. 列出模型：
+   ```bash
+   curl http://localhost:9090/v1/models
+   ```
+2. 非流式聊天：
+   ```bash
+   curl -X POST http://localhost:9090/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer sk-your-key" \
+     -d '{
+       "model": "glm-4.5",
+       "messages": [{"role": "user", "content": "你好，介绍一下项目"}],
+       "stream": false
+     }'
+   ```
+3. 流式聊天：
+   ```bash
+   curl -N -X POST http://localhost:9090/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer sk-your-key" \
+     -d '{
+       "model": "claude-4-sonnet",
+       "messages": [{"role": "user", "content": "用中文写一首七言绝句"}],
+       "stream": true
+     }'
+   ```
+4. 浏览器打开：
+   - `http://localhost:9090/docs` 查看 API 文档
+   - `http://localhost:9090/dashboard` 查看运行监控
+
+---
+
+## 6. 模型映射与多模型支持
+
+代理公开的模型名称默认取自 `MODEL_NAME`。当请求指明 `model` 字段时，程序会根据 `UPSTREAM_MODEL_ID_MAP` 将其转换为上游真实模型 ID：
+
+- 键（Key）为客户端可见的模型名称，可以保留大小写与空格；
+- 值（Value）为上游 `talk` 或 `chat/completions` 需要的真实 ID；
+- 若未命中映射，则回落到 `UPSTREAM_MODEL_ID_DEFAULT`；
+- `/v1/models` 失败时会返回 `MODEL_NAME` + 映射表中的所有键，便于客户端发现可用模型。
+
+示例：
+
+```env
+UPSTREAM_MODEL_ID_MAP='{
+  "glm-4.5": "glm-4.5",
+  "claude-4-sonnet": "claude-4-sonnet",
+  "glm-4.6": "0727-360B-API"
+}'
+```
+
+---
+
+## 7. `.env.local` 常见问题
+
+1. **文件未生效**：启动时务必附带 `--env-file=.env.local`；若仍失败，请确认文件在仓库根目录且无 BOM。
+2. **值包含特殊字符**：如 JSON 字符串、带空格的 Token，请使用单引号包裹或转义内部引号。
+3. **Windows PowerShell**：使用单引号时无需转义双引号，例如 `'$"value"'`。若使用旧版 `cmd`，建议直接 `set` 环境变量。
+
+---
+
+## 8. 常见故障排查
+
+| 症状                    | 可能原因                                           | 处理建议                                                                                |
+| ----------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 401 `Invalid API key`   | 客户端未携带 `Authorization: Bearer <DEFAULT_KEY>` | 确认 `.env.local` 中的 `DEFAULT_KEY` 并在请求头中使用                                   |
+| 503 `token_unavailable` | 未配置 `UPSTREAM_TOKEN` 且匿名 Token 获取失败      | 登录上游获取最新 Token 或检查网络代理                                                   |
+| 426 / Cloudflare 挑战   | 浏览器指纹或 Cookie 失效                           | 更新 `UPSTREAM_TOKEN`，同时刷新 `cf_clearance` 等 Cookie（curl 可通过 `--cookie` 携带） |
+| `/v1/models` 返回为空   | 映射表错误或上游接口变动                           | 检查 `UPSTREAM_MODEL_ID_MAP` 是否为合法 JSON，必要时通过浏览器抓包确认新的模型 ID       |
+| Dashboard 无数据        | 未触发请求或 KV 权限不足                           | 访问 `/v1/chat/completions` 后刷新 dashboard；若是 Deno Deploy，需启用 KV 权限          |
+
+更多日志可在启动终端查看，`DEBUG_MODE=false` 可减少输出。
+
+---
+
+## 9. 进阶主题
+
+- **KV Token 池**：若部署了批量注册器，可将 tokens 存入 Deno KV，代理会自动从 KV 中轮换使用。
+- **思维链模式**：通过 `THINK_TAGS_MODE=think` 可以把 `<details>` 转换为 `<think>` 标签，便于客户端区分；`raw` 则完全保留。
+- **Docker 部署**：`Dockerfile.deno` 适用于 Deno 镜像，构建后同样通过环境变量完成配置。
+- **与 Go 版本对比**：根目录的 `main.go` 提供了 CLI 版本实现，功能类似但构建方式不同，可按需选用。
+
+---
+
+## 10. API 使用范例
+
+### 10.1 Python (openai 官方 SDK)
 
 ```python
-import openai
+from openai import OpenAI
 
-# 配置客户端
-client = openai.OpenAI(
-    api_key="your-api-key",  # 对应 DEFAULT_KEY
+client = OpenAI(
+    api_key="sk-your-key",
     base_url="http://localhost:9090/v1"
 )
 
-# 非流式请求
-response = client.chat.completions.create(
-    model="GLM-4.5",
-    messages=[{"role": "user", "content": "你好，请介绍一下自己"}]
+resp = client.chat.completions.create(
+    model="glm-4.5",
+    messages=[{"role": "user", "content": "简单介绍一下你自己"}]
 )
-
-print(response.choices[0].message.content)
-
-# 流式请求
-response = client.chat.completions.create(
-    model="GLM-4.5",
-    messages=[{"role": "user", "content": "请写一首关于春天的诗"}],
-    stream=True
-)
-
-for chunk in response:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="")
+print(resp.choices[0].message.content)
 ```
 
-### curl示例
+### 10.2 Shell (curl)
 
 ```bash
-# 非流式请求
-curl -X POST http://localhost:9090/v1/chat/completions \
+curl -N -X POST http://localhost:9090/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer your-api-key" \
+  -H "Authorization: Bearer sk-your-key" \
   -d '{
-    "model": "GLM-4.5",
-    "messages": [{"role": "user", "content": "你好"}],
-    "stream": false
-  }'
-
-# 流式请求
-curl -X POST http://localhost:9090/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer your-api-key" \
-  -d '{
-    "model": "GLM-4.5",
-    "messages": [{"role": "user", "content": "你好"}],
+    "model": "claude-4-sonnet",
+    "messages": [{"role": "user", "content": "写一段 100 字的产品介绍"}],
     "stream": true
   }'
 ```
 
-## 🦕 Deno 特性
+---
 
-### 优势
+## 11. 贡献与许可
 
-- ✅ **安全第一**: 默认安全，显式权限控制
-- ✅ **现代标准**: 原生支持 TypeScript，无需配置
-- ✅ **简单部署**: 单一可执行文件，无需 node_modules
-- ✅ **内置工具**: 格式化、测试、打包等工具开箱即用
-- ✅ **Web标准**: 使用现代 Web API（fetch、streams等）
+- 欢迎通过 Issue / PR 提交改进建议或补丁，建议附带测试步骤。
+- 项目采用 [MIT License](../../LICENSE)。
 
-### 任务命令
-
-```bash
-# 启动服务
-deno task start
-
-# 开发模式（自动重启）
-deno task dev
-
-# 缓存依赖
-deno task cache
-```
-
-### 权限说明
-
-本项目需要以下权限：
-- `--allow-net`: 网络访问（必需，用于HTTP服务和上游API调用）
-- `--allow-env`: 环境变量读取（必需，用于配置）
-- `--allow-read`: 文件读取（可选，用于读取配置文件）
-
-## 🔧 故障排除
-
-### 常见问题
-
-1. **Deno未安装**
-   - 参考上面的安装说明安装 Deno
-
-2. **连接失败**
-   - 检查服务是否正常运行：`curl http://localhost:9090/v1/models`
-   - 访问API文档：`http://localhost:9090/docs`
-
-3. **认证失败**
-   - 检查 `DEFAULT_KEY` 环境变量设置
-   - 确认请求头中的 `Authorization` 格式正确
-
-4. **端口被占用**
-   - 修改 `PORT` 环境变量
-   - 或停止占用端口的服务
-
-5. **权限错误**
-   - 确保使用正确的权限标志运行 Deno
-   - 参考上面的"权限说明"部分
-
-## 🤝 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📄 许可证
-
-本项目采用 MIT 许可证。详情请参阅 [LICENSE](LICENSE) 文件。
-
-## ⚠️ 免责声明
-
-本项目与 Z.ai 官方无关，使用前请确保遵守 Z.ai 的服务条款。开发者不对因使用本项目而产生的任何问题负责。
-
-## 📞 联系方式
-
-如有问题或建议，请通过以下方式联系：
-
-- 提交 [Issue](https://github.com/libaxuan/ZtoApi/issues)
+如需协助，可在仓库提 Issue，或附上 `deno` / `curl` 的完整输出，便于定位问题。
