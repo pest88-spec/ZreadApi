@@ -1,8 +1,26 @@
 // 真实的 API 代理 - 基于 main.ts 适配 Deno Deploy
-const DEFAULT_KEY = Deno.env.get("DEFAULT_KEY") || "sk-your-key";
 const UPSTREAM_TOKEN = Deno.env.get("UPSTREAM_TOKEN") || "";
 const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") || "https://zread.ai/api/v1/talk";
 const DEBUG_MODE = Deno.env.get("DEBUG_MODE") === "true";
+
+// 支持多个API密钥
+function isValidApiKey(apiKey: string): boolean {
+  // 如果设置了DEFAULT_KEY，检查是否匹配
+  const defaultKey = Deno.env.get("DEFAULT_KEY");
+  if (defaultKey) {
+    return apiKey === defaultKey;
+  }
+
+  // 如果设置了API_KEYS（多个密钥，用|分隔）
+  const apiKeys = Deno.env.get("API_KEYS");
+  if (apiKeys) {
+    const keyList = apiKeys.split("|").map(k => k.trim()).filter(k => k.length > 0);
+    return keyList.includes(apiKey);
+  }
+
+  // 如果都没有设置，允许任何密钥（开放访问）
+  return true;
+}
 
 function generateBrowserHeaders(chatID: string, authToken: string): Record<string, string> {
   const chromeVersion = Math.floor(Math.random() * 3) + 138;
@@ -41,7 +59,7 @@ Deno.serve(async (req) => {
 
   // Authentication check
   const authHeader = req.headers.get("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ") || authHeader.slice(7) !== DEFAULT_KEY) {
+  if (!authHeader || !authHeader.startsWith("Bearer ") || !isValidApiKey(authHeader.slice(7))) {
     return new Response(JSON.stringify({
       error: { message: "Invalid API key" }
     }), {
