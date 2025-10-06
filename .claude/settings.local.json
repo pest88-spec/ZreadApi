@@ -30,7 +30,9 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "WebFetch(domain:www.deno.com)"
+      "WebFetch(domain:www.deno.com)",
+      "Bash(cut:*)",
+      "Bash(tr:*)"
     ],
     "deny": [],
     "ask": []
