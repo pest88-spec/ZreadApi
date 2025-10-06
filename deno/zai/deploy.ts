@@ -237,10 +237,13 @@ Deno.serve(async (req) => {
       }
 
       if (DEBUG_MODE) {
+        console.log("=== DEBUG INFO ===");
         console.log("Model routing:", model, "->", routing.platform, routing.upstreamModel);
         console.log("Calling upstream API:", routing.upstreamUrl);
         console.log("Request body:", JSON.stringify(upstreamBody, null, 2));
         console.log("Authorization header:", headers.Authorization?.substring(0, 50) + "...");
+        console.log("All headers:", JSON.stringify(headers, null, 2));
+        console.log("=== END DEBUG ===");
       }
 
       const response = await fetch(routing.upstreamUrl, {
