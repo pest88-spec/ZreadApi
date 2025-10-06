@@ -1,7 +1,24 @@
 // 真实的 API 代理 - 基于 main.ts 适配 Deno Deploy
-const UPSTREAM_TOKEN = Deno.env.get("UPSTREAM_TOKEN") || "";
 const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") || "https://zread.ai/api/v1/talk";
 const DEBUG_MODE = Deno.env.get("DEBUG_MODE") === "true";
+
+// Token池管理
+let currentTokenIndex = 0;
+const UPSTREAM_TOKENS = Deno.env.get("UPSTREAM_TOKENS") || Deno.env.get("UPSTREAM_TOKEN") || "";
+
+function getNextUpstreamToken(): string {
+  const tokens = UPSTREAM_TOKENS.split("|").map(t => t.trim()).filter(t => t.length > 0);
+  if (tokens.length === 0) return "";
+
+  const token = tokens[currentTokenIndex];
+  currentTokenIndex = (currentTokenIndex + 1) % tokens.length;
+
+  if (DEBUG_MODE) {
+    console.log(`Using token ${currentTokenIndex}/${tokens.length}`);
+  }
+
+  return token;
+}
 
 // 支持多个API密钥
 function isValidApiKey(apiKey: string): boolean {
@@ -106,9 +123,9 @@ Deno.serve(async (req) => {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    if (!UPSTREAM_TOKEN) {
+    if (!UPSTREAM_TOKENS) {
       return new Response(JSON.stringify({
-        error: { message: "UPSTREAM_TOKEN not configured" }
+        error: { message: "UPSTREAM_TOKENS not configured" }
       }), {
         status: 500,
         headers: { "Content-Type": "application/json" }
@@ -130,7 +147,8 @@ Deno.serve(async (req) => {
       } catch {}
 
       const chatId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const headers = generateBrowserHeaders(chatId, UPSTREAM_TOKEN);
+      const upstreamToken = getNextUpstreamToken();
+      const headers = generateBrowserHeaders(chatId, upstreamToken);
 
       const upstreamBody = {
         model: upstreamModel,
