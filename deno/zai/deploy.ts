@@ -53,13 +53,14 @@ function resolveModelRouting(model: string): { upstreamUrl: string; upstreamMode
 }
 
 function getNextUpstreamToken(): string {
+  // 在Deno Deploy环境下，只依赖环境变量中的token
   const tokens = UPSTREAM_TOKENS.split("|").map(t => t.trim()).filter(t => t.length > 0);
 
   if (tokens.length === 0) {
     if (DEBUG_MODE) {
       console.error("No tokens configured in UPSTREAM_TOKENS");
     }
-    throw new Error("No upstream tokens configured");
+    throw new Error("No upstream tokens configured - please set UPSTREAM_TOKENS environment variable");
   }
 
   const token = tokens[currentTokenIndex];
